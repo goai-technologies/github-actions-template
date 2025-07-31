@@ -2,6 +2,9 @@ name: "Build and Push Docker to ECR"
 description: "Reusable composite action to build and push Docker image to AWS ECR"
 author: "Your Name or Org"
 
+permissions:
+  id-token: write
+
 inputs:
   service:
     description: "The service name (e.g., frontend or backend)"
