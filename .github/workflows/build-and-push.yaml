@@ -1,0 +1,69 @@
+name: Build and Push to ECR
+
+on:
+  workflow_call:
+    inputs:
+      aws_region:
+        required: true
+        type: string
+      ecr_repo:
+        required: true
+        type: string
+      dockerfile_path:
+        required: false
+        type: string
+        default: Dockerfile
+    secrets:
+      AWS_ROLE_TO_ASSUME:
+        required: true
+
+jobs:
+  build-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: vars
+        run: |
+          BRANCH=$(echo "${GITHUB_REF##*/}" | tr '/' '-')
+          COMMIT_SHA=${GITHUB_SHA::7}
+          IMAGE_TAG="${BRANCH}-${COMMIT_SHA}"
+          echo "tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Build Docker image
+        run: |
+          docker build -f ${{ inputs.dockerfile_path }} \
+            -t ${{ inputs.ecr_repo }}:${{ steps.vars.outputs.tag }} .
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@v0.17.0
+        with:
+          image-ref: ${{ inputs.ecr_repo }}:${{ steps.vars.outputs.tag }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Push Docker image to ECR
+        run: |
+          docker tag ${{ inputs.ecr_repo }}:${{ steps.vars.outputs.tag }} \
+            ${{ inputs.ecr_repo }}:${{ steps.vars.outputs.branch }}
+
+          docker push ${{ inputs.ecr_repo }}:${{ steps.vars.outputs.tag }}
+          docker push ${{ inputs.ecr_repo }}:${{ steps.vars.outputs.branch }}
