@@ -1,69 +1,44 @@
-name: Build and Push to ECR
+name: "Build and Push Docker to ECR"
+description: "Reusable composite action to build and push Docker image to AWS ECR"
+author: "Your Name or Org"
 
-on:
-  workflow_call:
-    inputs:
-      aws_region:
-        required: true
-        type: string
-      ecr_repo:
-        required: true
-        type: string
-      dockerfile_path:
-        required: false
-        type: string
-        default: Dockerfile
-    secrets:
-      AWS_ROLE_TO_ASSUME:
-        required: true
+inputs:
+  service:
+    description: "The service name (e.g., frontend or backend)"
+    required: true
+  environment:
+    description: "Deployment environment (develop, staging, prod)"
+    required: true
+  image_tag:
+    description: "Image tag to push (e.g., SHA, latest)"
+    required: false
+    default: "latest"
+  aws-region:
+    description: "AWS region for ECR"
+    required: true
 
-jobs:
-  build-push:
-    name: Build and Push Docker Image
-    runs-on: ubuntu-latest
+runs:
+  using: "composite"
+  steps:
+    - name: Configure AWS credentials from OIDC
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+        aws-region: ${{ inputs.aws-region }}
 
-    permissions:
-      id-token: write
-      contents: read
+    - name: Login to Amazon ECR
+      shell: bash
+      run: |
+        aws ecr get-login-password --region ${{ inputs.aws-region }} \
+          | docker login --username AWS \
+          --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com
 
-    steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
+    - name: Build Docker image
+      shell: bash
+      run: |
+        docker build -t ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com/${{ inputs.service }}/${{ inputs.environment }}:${{ inputs.image_tag }} .
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ inputs.aws_region }}
-
-      - name: Log in to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Set image tag
-        id: vars
-        run: |
-          BRANCH=$(echo "${GITHUB_REF##*/}" | tr '/' '-')
-          COMMIT_SHA=${GITHUB_SHA::7}
-          IMAGE_TAG="${BRANCH}-${COMMIT_SHA}"
-          echo "tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
-
-      - name: Build Docker image
-        run: |
-          docker build -f ${{ inputs.dockerfile_path }} \
-            -t ${{ inputs.ecr_repo }}:${{ steps.vars.outputs.tag }} .
-
-      - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@v0.17.0
-        with:
-          image-ref: ${{ inputs.ecr_repo }}:${{ steps.vars.outputs.tag }}
-          format: 'table'
-          severity: 'CRITICAL,HIGH'
-
-      - name: Push Docker image to ECR
-        run: |
-          docker tag ${{ inputs.ecr_repo }}:${{ steps.vars.outputs.tag }} \
-            ${{ inputs.ecr_repo }}:${{ steps.vars.outputs.branch }}
-
-          docker push ${{ inputs.ecr_repo }}:${{ steps.vars.outputs.tag }}
-          docker push ${{ inputs.ecr_repo }}:${{ steps.vars.outputs.branch }}
+    - name: Push Docker image
+      shell: bash
+      run: |
+        docker push ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com/${{ inputs.service }}/${{ inputs.environment }}:${{ inputs.image_tag }}
