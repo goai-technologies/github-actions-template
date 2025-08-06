@@ -40,6 +40,7 @@ runs:
       shell: bash
       run: |
         docker build -t ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com/${{ inputs.service }}/${{ inputs.environment }}:${{ inputs.image_tag }} .
+        docker tag ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com/${{ inputs.service }}/${{ inputs.environment }}:latest .
 
     - name: Push Docker image
       shell: bash
