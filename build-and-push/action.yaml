@@ -13,7 +13,7 @@ inputs:
     description: "Deployment environment (develop, staging, prod)"
     required: true
   image_tag:
-    description: "Image tag to push (e.g., SHA, latest)"
+    description: "Image tag to push (e.g., commit SHA)"
     required: false
     default: "latest"
   aws-region:
@@ -32,17 +32,25 @@ runs:
     - name: Login to Amazon ECR
       shell: bash
       run: |
-        aws ecr get-login-password --region ${{ inputs.aws-region }} \
-          | docker login --username AWS \
+        aws ecr get-login-password --region ${{ inputs.aws-region }} | docker login \
+          --username AWS \
           --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com
 
-    - name: Build Docker image
+    - name: Build and tag Docker image
       shell: bash
       run: |
-        docker build -t ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com/${{ inputs.service }}/${{ inputs.environment }}:${{ inputs.image_tag }} .
-        docker tag ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com/${{ inputs.service }}/${{ inputs.environment }}:latest
+        ECR_REPO="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com/${{ inputs.service }}/${{ inputs.environment }}"
+        
+        # Build with the specified tag (e.g., commit SHA)
+        docker build -t "$ECR_REPO:${{ inputs.image_tag }}" .
 
-    - name: Push Docker image
+        # Also tag it as :latest for convenience
+        docker tag "$ECR_REPO:${{ inputs.image_tag }}" "$ECR_REPO:latest"
+
+    - name: Push Docker images to ECR
       shell: bash
       run: |
-        docker push ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com/${{ inputs.service }}/${{ inputs.environment }}:${{ inputs.image_tag }}
+        ECR_REPO="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com/${{ inputs.service }}/${{ inputs.environment }}"
+        
+        docker push "$ECR_REPO:${{ inputs.image_tag }}"
+        docker push "$ECR_REPO:latest"
