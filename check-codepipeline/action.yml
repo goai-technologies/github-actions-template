@@ -52,11 +52,11 @@ runs:
         echo "Waiting for CodePipeline '$PIPELINE' execution $EXECUTION_ID to complete..."
 
         for i in $(seq 1 $MAX_RETRIES); do
-          STATUS=$(aws codepipeline get-pipeline-state \
-                     --name "$PIPELINE" \
-                     --pipeline-execution-id "$EXECUTION_ID" \
-                     --query "stageStates[*].latestExecution.status" \
-                     --output text)
+          STATUS=$(aws codepipeline get-pipeline-execution \
+             --pipeline-name "$PIPELINE" \
+             --pipeline-execution-id "$EXECUTION_ID" \
+             --query "pipelineExecution.status" \
+             --output text)
 
           echo "Attempt $i: Status = $STATUS"
 
