@@ -12,6 +12,14 @@ inputs:
   codepipeline-name:
     required: true
     description: "CodePipeline name to check"
+  max-retries:
+    required: false
+    default: 150
+    description: "Maximum number of polling attempts"
+  poll-interval:
+    required: false
+    default: 20
+    description: "Seconds to wait between polls"
 
 runs:
   using: "composite"
@@ -26,6 +34,8 @@ runs:
       shell: bash
       run: |
         PIPELINE="${{ inputs.codepipeline-name }}"
+        MAX_RETRIES=${{ inputs.max-retries }}
+        POLL_INTERVAL=${{ inputs.poll-interval }}
 
         # Get the latest execution ID
         EXECUTION_ID=$(aws codepipeline list-pipeline-executions \
@@ -34,9 +44,32 @@ runs:
                         --query "pipelineExecutionSummaries[0].pipelineExecutionId" \
                         --output text)
 
-        echo "Waiting for CodePipeline '$PIPELINE' execution $EXECUTION_ID to complete..."
-        aws codepipeline wait pipeline-execution-succeeded \
-          --pipeline-name "$PIPELINE" \
-          --pipeline-execution-id "$EXECUTION_ID"
+        if [ "$EXECUTION_ID" == "None" ]; then
+          echo "⚠️ No pipeline executions found"
+          exit 1
+        fi
 
-        echo "✅ CodePipeline execution succeeded!"
+        echo "Waiting for CodePipeline '$PIPELINE' execution $EXECUTION_ID to complete..."
+
+        for i in $(seq 1 $MAX_RETRIES); do
+          STATUS=$(aws codepipeline get-pipeline-state \
+                     --name "$PIPELINE" \
+                     --query "stageStates[*].latestExecution.status" \
+                     --output text)
+
+          echo "Attempt $i: Status = $STATUS"
+
+          if [[ "$STATUS" == "Succeeded" ]]; then
+            echo "✅ CodePipeline succeeded!"
+            exit 0
+          elif [[ "$STATUS" == "Failed" ]] || [[ "$STATUS" == "Stopped" ]]; then
+            echo "❌ CodePipeline failed!"
+            exit 1
+          else
+            echo "⏳ Pipeline in progress. Waiting $POLL_INTERVAL seconds..."
+            sleep $POLL_INTERVAL
+          fi
+        done
+
+        echo "❌ Timeout waiting for CodePipeline"
+        exit 1
