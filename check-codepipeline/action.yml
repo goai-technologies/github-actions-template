@@ -1,0 +1,35 @@
+name: "Check CodePipeline Status"
+description: "Checks AWS CodePipeline status and fails if not successful"
+author: "Your Name or Org"
+
+inputs:
+  aws-region:
+    required: true
+    description: "AWS region"
+  aws-role-to-assume:
+    required: true
+    description: "AWS Role ARN to assume"
+  codepipeline-name:
+    required: true
+    description: "CodePipeline name to check"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ inputs.aws-role-to-assume }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Check CodePipeline Status
+      shell: bash
+      run: |
+        STATUS=$(aws codepipeline get-pipeline-state --name ${{ inputs.codepipeline-name }} \
+                 --query "stageStates[*].latestExecution.status" --output text)
+        echo "CodePipeline Status: $STATUS"
+        if [[ "$STATUS" != "Succeeded" ]]; then
+          echo "❌ CodePipeline is not successful!"
+          exit 1
+        fi
+        echo "✅ CodePipeline is successful!"

@@ -1,0 +1,47 @@
+name: "Check CodeDeploy Status"
+description: "Checks AWS CodeDeploy deployment status and fails if not successful"
+author: "Your Name or Org"
+
+inputs:
+  aws-region:
+    required: true
+    description: "AWS region"
+  aws-role-to-assume:
+    required: true
+    description: "AWS Role ARN to assume"
+  codedeploy-app-name:
+    required: true
+    description: "CodeDeploy application name"
+  codedeploy-deployment-group:
+    required: true
+    description: "CodeDeploy deployment group name"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ inputs.aws-role-to-assume }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Check CodeDeploy Deployment Status
+      shell: bash
+      run: |
+        DEPLOYMENT_ID=$(aws deploy list-deployments \
+                        --application-name ${{ inputs.codedeploy-app-name }} \
+                        --deployment-group-name ${{ inputs.codedeploy-deployment-group }} \
+                        --query "deployments[0]" --output text)
+        if [ "$DEPLOYMENT_ID" != "None" ]; then
+          DEPLOY_STATUS=$(aws deploy get-deployment \
+                          --deployment-id $DEPLOYMENT_ID \
+                          --query "deploymentInfo.status" --output text)
+          echo "CodeDeploy Deployment Status: $DEPLOY_STATUS"
+          if [[ "$DEPLOY_STATUS" != "Succeeded" ]]; then
+            echo "❌ CodeDeploy deployment failed!"
+            exit 1
+          fi
+        else
+          echo "⚠️ No CodeDeploy deployments found."
+        fi
+        echo "✅ CodeDeploy deployment is successful!"
