@@ -44,6 +44,8 @@ runs:
                         --query "pipelineExecutionSummaries[0].pipelineExecutionId" \
                         --output text)
 
+        echo "Execution ID: $EXECUTION_ID"
+
         if [ "$EXECUTION_ID" == "None" ]; then
           echo "⚠️ No pipeline executions found"
           exit 1
@@ -53,24 +55,21 @@ runs:
 
         for i in $(seq 1 $MAX_RETRIES); do
           STATUS=$(aws codepipeline get-pipeline-execution \
-             --pipeline-name "$PIPELINE" \
-             --pipeline-execution-id "$EXECUTION_ID" \
-             --query "pipelineExecution.status" \
-             --output text)
+                    --pipeline-name "$PIPELINE" \
+                    --pipeline-execution-id "$EXECUTION_ID" \
+                    --query "pipelineExecution.status" \
+                    --output text 2>/dev/null)
 
-          echo "Attempt $i: Status = $STATUS"
-
-          if [[ "$STATUS" == "Succeeded" ]]; then
-            echo "✅ CodePipeline succeeded!"
-            exit 0
-          elif [[ "$STATUS" == "Failed" ]] || [[ "$STATUS" == "Stopped" ]]; then
-            echo "❌ CodePipeline failed!"
-            exit 1
+          if [ $? -eq 0 ] && [[ "$STATUS" =~ ^(InProgress|Succeeded|Failed|Stopped)$ ]]; then
+            echo "Pipeline execution ready. Status: $STATUS"
+            break
           else
-            echo "⏳ Pipeline in progress. Waiting $POLL_INTERVAL seconds..."
+            echo "Waiting for pipeline execution to become valid... ($i/$MAX_RETRIES)"
             sleep $POLL_INTERVAL
           fi
         done
 
-        echo "❌ Timeout waiting for CodePipeline"
-        exit 1
+        if [ -z "$STATUS" ]; then
+          echo "❌ Pipeline execution never became valid"
+          exit 1
+        fi
