@@ -25,11 +25,18 @@ runs:
     - name: Check CodePipeline Status
       shell: bash
       run: |
-        STATUS=$(aws codepipeline get-pipeline-state --name ${{ inputs.codepipeline-name }} \
-                 --query "stageStates[*].latestExecution.status" --output text)
-        echo "CodePipeline Status: $STATUS"
-        if [[ "$STATUS" != "Succeeded" ]]; then
-          echo "❌ CodePipeline is not successful!"
-          exit 1
-        fi
-        echo "✅ CodePipeline is successful!"
+        PIPELINE="${{ inputs.codepipeline-name }}"
+
+        # Get the latest execution ID
+        EXECUTION_ID=$(aws codepipeline list-pipeline-executions \
+                        --pipeline-name "$PIPELINE" \
+                        --max-items 1 \
+                        --query "pipelineExecutionSummaries[0].pipelineExecutionId" \
+                        --output text)
+
+        echo "Waiting for CodePipeline '$PIPELINE' execution $EXECUTION_ID to complete..."
+        aws codepipeline wait pipeline-execution-succeeded \
+          --pipeline-name "$PIPELINE" \
+          --pipeline-execution-id "$EXECUTION_ID"
+
+        echo "✅ CodePipeline execution succeeded!"

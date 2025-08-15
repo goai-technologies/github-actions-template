@@ -28,20 +28,22 @@ runs:
     - name: Check CodeDeploy Deployment Status
       shell: bash
       run: |
+        APP="${{ inputs.codedeploy-app-name }}"
+        DG="${{ inputs.codedeploy-deployment-group }}"
+
+        # Get latest deployment ID
         DEPLOYMENT_ID=$(aws deploy list-deployments \
-                        --application-name ${{ inputs.codedeploy-app-name }} \
-                        --deployment-group-name ${{ inputs.codedeploy-deployment-group }} \
-                        --query "deployments[0]" --output text)
-        if [ "$DEPLOYMENT_ID" != "None" ]; then
-          DEPLOY_STATUS=$(aws deploy get-deployment \
-                          --deployment-id $DEPLOYMENT_ID \
-                          --query "deploymentInfo.status" --output text)
-          echo "CodeDeploy Deployment Status: $DEPLOY_STATUS"
-          if [[ "$DEPLOY_STATUS" != "Succeeded" ]]; then
-            echo "❌ CodeDeploy deployment failed!"
-            exit 1
-          fi
-        else
-          echo "⚠️ No CodeDeploy deployments found."
+                          --application-name "$APP" \
+                          --deployment-group-name "$DG" \
+                          --query "deployments[0]" \
+                          --output text)
+
+        if [ "$DEPLOYMENT_ID" == "None" ]; then
+          echo "⚠️ No CodeDeploy deployments found"
+          exit 1
         fi
-        echo "✅ CodeDeploy deployment is successful!"
+
+        echo "Waiting for CodeDeploy deployment $DEPLOYMENT_ID to complete..."
+        aws deploy wait deployment-successful --deployment-id "$DEPLOYMENT_ID"
+
+        echo "✅ CodeDeploy deployment succeeded!"
