@@ -14,11 +14,11 @@ inputs:
     description: "CodePipeline name to check"
   max-retries:
     required: false
-    default: 150
+    default: 120
     description: "Maximum number of polling attempts"
   poll-interval:
     required: false
-    default: 20
+    default: 10
     description: "Seconds to wait between polls"
 
 runs:
@@ -54,6 +54,7 @@ runs:
         for i in $(seq 1 $MAX_RETRIES); do
           STATUS=$(aws codepipeline get-pipeline-state \
                      --name "$PIPELINE" \
+                     --pipeline-execution-id "$EXECUTION_ID" \
                      --query "stageStates[*].latestExecution.status" \
                      --output text)
 
