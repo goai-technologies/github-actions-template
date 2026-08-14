@@ -1,0 +1,13 @@
+# frozen_string_literal: true
+
+# Ruby 3.1+, Bundler 2.5.23 (see release/README.md).
+# CI uses ruby/setup-ruby with bundler-cache: true against this Gemfile.
+# Run `bundle install` once to generate Gemfile.lock, then commit the lock.
+
+source "https://rubygems.org"
+
+gem "fastlane"
+
+# Uncomment if you add Fastlane plugins (keep fastlane/Pluginfile in sync):
+# plugins_path = File.join(File.dirname(__FILE__), "fastlane", "Pluginfile")
+# eval_gemfile(plugins_path) if File.exist?(plugins_path)

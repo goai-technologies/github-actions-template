@@ -1,0 +1,145 @@
+name: Mobile Store Upload (Fastlane)
+
+# Upload prebuilt IPA/AAB from a GitHub Release — never rebuilds.
+# Production targets use the `production` GitHub Environment (required reviewers).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version or tag (x.y.z or vX.Y.Z)"
+        required: true
+      platform:
+        description: "ios | android | both"
+        required: true
+        default: both
+        type: choice
+        options: [ios, android, both]
+      ios_target:
+        description: "iOS destination"
+        required: true
+        default: testflight
+        type: choice
+        options: [testflight, appstore]
+      android_track:
+        description: "Android track"
+        required: true
+        default: internal
+        type: choice
+        options: [internal, production]
+      rollout:
+        description: "Staged rollout (e.g. 0.1). Empty = full."
+        required: false
+        default: ""
+      submit_review:
+        description: "App Store: submit for review after upload"
+        required: false
+        default: false
+        type: boolean
+  release:
+    types: [published]
+
+concurrency:
+  group: store-upload-${{ github.event.inputs.version || github.event.release.tag_name }}-${{ github.event.inputs.platform || 'both' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      ios_target: ${{ steps.mode.outputs.ios_target }}
+      android_track: ${{ steps.mode.outputs.android_track }}
+      run_ios: ${{ steps.mode.outputs.run_ios }}
+      run_android: ${{ steps.mode.outputs.run_android }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve version + tag
+        id: v
+        env:
+          APP_VERSION: ${{ github.event.inputs.version || github.event.release.tag_name }}
+        run: bash scripts/resolve_mobile_version.sh
+      - name: Resolve upload mode
+        id: mode
+        run: |
+          platform="${{ github.event.inputs.platform || 'both' }}"
+          ios_target="${{ github.event.inputs.ios_target || 'testflight' }}"
+          android_track="${{ github.event.inputs.android_track || 'internal' }}"
+          run_ios=false; run_android=false
+          [ "$platform" = "ios" ] || [ "$platform" = "both" ] && run_ios=true
+          [ "$platform" = "android" ] || [ "$platform" = "both" ] && run_android=true
+          {
+            echo "ios_target=$ios_target"
+            echo "android_track=$android_track"
+            echo "run_ios=$run_ios"
+            echo "run_android=$run_android"
+          } >> "$GITHUB_OUTPUT"
+
+  ios-upload:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.run_ios == 'true' }}
+    runs-on: macos-latest
+    environment: ${{ needs.resolve.outputs.ios_target == 'appstore' && 'production' || 'beta' }}
+    env:
+      APP_VERSION: ${{ needs.resolve.outputs.version }}
+      IOS_BUNDLE_ID: ${{ secrets.IOS_BUNDLE_ID }}
+      IOS_SCHEME: ${{ secrets.IOS_SCHEME }}
+      ASC_TEAM_ID: ${{ secrets.ASC_TEAM_ID }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+      TF_GROUPS: ${{ vars.TF_GROUPS }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.1"
+          bundler-cache: true
+      - name: Download IPA from Release
+        run: |
+          mkdir -p release/download
+          gh release download "${{ needs.resolve.outputs.tag }}" --pattern '*.ipa' --dir release/download
+      - name: Upload to TestFlight / App Store
+        run: |
+          ipa="$(ls release/download/*.ipa | head -n1)"
+          if [ "${{ needs.resolve.outputs.ios_target }}" = "appstore" ]; then
+            bundle exec fastlane ios appstore_submit ipa:"$ipa" submit:${{ github.event.inputs.submit_review || 'false' }}
+          else
+            bundle exec fastlane ios testflight_upload ipa:"$ipa"
+          fi
+
+  android-upload:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.run_android == 'true' }}
+    runs-on: ubuntu-latest
+    environment: ${{ needs.resolve.outputs.android_track == 'production' && 'production' || 'beta' }}
+    env:
+      APP_VERSION: ${{ needs.resolve.outputs.version }}
+      ANDROID_PACKAGE_NAME: ${{ secrets.ANDROID_PACKAGE_NAME }}
+      PLAY_JSON_BASE64: ${{ secrets.PLAY_JSON_BASE64 }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.1"
+          bundler-cache: true
+      - name: Download AAB from Release
+        if: ${{ needs.resolve.outputs.android_track != 'production' }}
+        run: |
+          mkdir -p release/download
+          gh release download "${{ needs.resolve.outputs.tag }}" --pattern '*.aab' --dir release/download
+      - name: Upload / promote on Play
+        run: |
+          rollout="${{ github.event.inputs.rollout || '' }}"
+          if [ "${{ needs.resolve.outputs.android_track }}" = "production" ]; then
+            bundle exec fastlane android play_promote track:production rollout:"$rollout"
+          else
+            aab="$(ls release/download/*.aab | head -n1)"
+            bundle exec fastlane android play_upload track:internal rollout:"$rollout" aab:"$aab"
+          fi

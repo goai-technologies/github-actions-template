@@ -1,0 +1,12 @@
+# frozen_string_literal: true
+
+# Match reads certs/profiles from a SEPARATE PRIVATE git repo — never the app repo.
+# CI clones this readonly (see Fastfile: readonly: is_ci?).
+# Replace placeholders / set the matching GitHub Actions secrets (see release/SECRETS.md).
+
+git_url(ENV.fetch("MATCH_GIT_URL", "{{MATCH_GIT_URL}}"))
+git_branch(ENV.fetch("MATCH_GIT_BRANCH", "master")) # Match default is master; set to main if your certs repo uses it
+storage_mode("git")
+type("appstore")
+
+app_identifier([ENV.fetch("IOS_BUNDLE_ID", "{{IOS_BUNDLE_ID}}")])

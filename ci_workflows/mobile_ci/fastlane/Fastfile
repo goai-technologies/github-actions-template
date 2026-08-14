@@ -1,0 +1,522 @@
+# frozen_string_literal: true
+
+# APDM mandatory mobile Fastlane scaffold (hardened, Expo + pnpm).
+#
+# Contract (see README.md):
+#   android: build_android / internal_android / production_android
+#   ios:     build_ios / beta_ios / release_ios
+# Artifacts → release/<version>/  then optional store upload.
+#
+# iOS signing — two supported modes, auto-detected (no config flag needed):
+#   A. DIRECT (recommended, no separate repo): set IOS_DIST_CERT_P12_BASE64 +
+#      IOS_PROVISION_PROFILE_BASE64 (see README.md). CI imports the .p12 into a
+#      temporary keychain and installs the App Store profile directly. CI never creates certs.
+#   B. MATCH (legacy): set MATCH_GIT_URL + MATCH_PASSWORD and CI clones the encrypted certs repo
+#      readonly. Used automatically only when the DIRECT secrets are absent.
+#
+# Principles:
+#   - iOS build skips GRACEFULLY when neither signing mode is configured (Android still ships).
+#   - CI must never CREATE Apple certs: DIRECT imports pre-made certs; Match runs readonly on CI.
+#   - P12 fallback import handles "MAC verification failed" password-protected certs (Match mode).
+#   - No unquoted `iPhone Distribution` in xcargs (xcodebuild treats `Distribution` as an action).
+
+default_platform(:ios)
+
+# Map documented CLI options (e.g. `fastlane ios build_ios version:"1.0.0"`) onto the
+# env vars the helpers read, so local and CI invocations behave identically.
+before_all do |_lane, options|
+  ENV["APP_VERSION"] = options[:version] if options[:version]
+  ENV["APP_BUILD_NUMBER"] = options[:build].to_s if options[:build]
+end
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def is_ci?
+  ENV["CI"] == "true" || !ENV["GITHUB_ACTIONS"].nil?
+end
+
+def release_version
+  # Workflows export APP_VERSION; local runs can pass `version:"x.y.z"` (mapped to APP_VERSION below).
+  ENV.fetch("APP_VERSION", "0.1.0")
+end
+
+def release_build
+  ENV.fetch("APP_BUILD_NUMBER", ENV.fetch("GITHUB_RUN_NUMBER", "1"))
+end
+
+def version_dir_name
+  "#{release_version}+#{release_build}"
+end
+
+def release_dir
+  root = File.expand_path("..", __dir__)
+  dir = File.join(root, "release", version_dir_name)
+  FileUtils.mkdir_p(dir)
+  dir
+end
+
+def write_metadata!(platform:, artifacts:)
+  require "json"
+  meta = {
+    version: release_version,
+    build: release_build,
+    platform: platform,
+    git_sha: ENV["GITHUB_SHA"] || `git rev-parse HEAD`.strip,
+    built_at: Time.now.utc.iso8601,
+    artifacts: artifacts
+  }
+  path = File.join(release_dir, "build-metadata.json")
+  File.write(path, JSON.pretty_generate(meta))
+  UI.message("Wrote #{path}")
+end
+
+def mobile_root
+  File.expand_path("..", __dir__)
+end
+
+# Resolve android/ relative to the Expo app root (supports monorepo MOBILE_PATH when
+# Fastlane is invoked from repo root; when cwd is already mobile_root, ANDROID_PROJECT_DIR=android).
+def android_project_dir
+  rel = ENV.fetch("ANDROID_PROJECT_DIR", "android")
+  return rel if rel.start_with?("/")
+
+  mobile = mobile_root
+  candidate = File.expand_path(rel, mobile)
+  return candidate if File.directory?(candidate)
+
+  mobile_path = ENV["MOBILE_PATH"].to_s
+  unless mobile_path.empty?
+    from_repo = File.expand_path(File.join(mobile_path, rel), Dir.pwd)
+    return from_repo if File.directory?(from_repo)
+  end
+
+  candidate
+end
+
+def android_project_dir_for_gradle
+  dir = android_project_dir
+  root = mobile_root
+  prefix = root.end_with?("/") ? root : "#{root}/"
+  if dir.start_with?(prefix)
+    dir.sub(/\A#{Regexp.escape(prefix)}/, "")
+  else
+    ENV.fetch("ANDROID_PROJECT_DIR", "android")
+  end
+end
+
+def find_android_artifact(ext, lane_key)
+  from_lane = Actions.lane_context[lane_key]
+  return from_lane if from_lane && File.file?(from_lane)
+
+  pattern = ext == "aab" ? "**/outputs/bundle/release/*.aab" : "**/outputs/apk/release/*.apk"
+  Dir[File.join(android_project_dir, pattern)].max_by { |f| File.mtime(f) }
+end
+
+def resolve_ios_xcodeproj
+  return ENV["IOS_XCODEPROJ"] if ENV["IOS_XCODEPROJ"] && !ENV["IOS_XCODEPROJ"].empty?
+  scheme = ENV["IOS_SCHEME"]
+  if scheme && !scheme.empty? && File.exist?("ios/#{scheme}.xcodeproj")
+    return "ios/#{scheme}.xcodeproj"
+  end
+  Dir["ios/*.xcodeproj"].first || Dir["*.xcodeproj"].first || "ios/App.xcodeproj"
+end
+
+def resolve_ios_scheme
+  return ENV["IOS_SCHEME"] if ENV["IOS_SCHEME"] && !ENV["IOS_SCHEME"].empty?
+  proj = resolve_ios_xcodeproj
+  File.basename(proj, ".xcodeproj")
+end
+
+def resolve_ios_workspace
+  return ENV["IOS_WORKSPACE"] if ENV["IOS_WORKSPACE"] && !ENV["IOS_WORKSPACE"].empty?
+  scheme = resolve_ios_scheme
+  if File.exist?("ios/#{scheme}.xcworkspace")
+    return "ios/#{scheme}.xcworkspace"
+  end
+  Dir["ios/*.xcworkspace"].first || Dir["*.xcworkspace"].first || "ios/#{scheme}.xcworkspace"
+end
+
+# ASC API key is required for BOTH signing modes (build export + upload talk to Apple).
+def asc_ready?
+  env?("ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_KEY_P8_BASE64")
+end
+
+# Mode A — direct: a pre-made distribution .p12 + App Store provisioning profile in secrets.
+def direct_signing_ready?
+  env?("IOS_DIST_CERT_P12_BASE64", "IOS_PROVISION_PROFILE_BASE64")
+end
+
+# Mode B — Match: encrypted certs cloned readonly from a separate git repo.
+def match_signing_ready?
+  env?("MATCH_GIT_URL", "MATCH_PASSWORD")
+end
+
+def ios_signing_ready?
+  asc_ready? && (direct_signing_ready? || match_signing_ready?)
+end
+
+# Decode ASC .p8 (base64) to a file and return an app_store_connect_api_key hash.
+def asc_api_key!
+  require "base64"
+  key_dir = File.expand_path("~/private_keys")
+  FileUtils.mkdir_p(key_dir)
+  key_path = File.join(key_dir, "AuthKey_#{ENV['ASC_KEY_ID']}.p8")
+  File.write(key_path, Base64.decode64(ENV.fetch("ASC_KEY_P8_BASE64")))
+  app_store_connect_api_key(
+    key_id: ENV.fetch("ASC_KEY_ID"),
+    issuer_id: ENV.fetch("ASC_ISSUER_ID"),
+    key_filepath: key_path,
+    in_house: false
+  )
+end
+
+# DIRECT signing (no Match): decode the distribution .p12 + App Store .mobileprovision from
+# secrets, import them into the keychain, install the profile, and return the profile's Name
+# (needed for export_options / update_code_signing_settings). CI never creates certs here.
+def direct_import_signing!(keychain_name:, keychain_password:)
+  require "base64"
+  require "shellwords"
+
+  p12_path = File.expand_path("~/dist_cert.p12")
+  File.write(p12_path, Base64.decode64(ENV.fetch("IOS_DIST_CERT_P12_BASE64")))
+  import_certificate(
+    certificate_path: p12_path,
+    certificate_password: ENV.fetch("IOS_DIST_CERT_PASSWORD", ""),
+    keychain_name: keychain_name,
+    keychain_password: keychain_password
+  )
+
+  profile_path = File.expand_path("~/appstore.mobileprovision")
+  File.write(profile_path, Base64.decode64(ENV.fetch("IOS_PROVISION_PROFILE_BASE64")))
+  install_provisioning_profile(path: profile_path)
+
+  # Derive the profile's Name from its decoded plist so export_options matches exactly.
+  # Allow an explicit override for edge cases.
+  name = ENV["IOS_PROVISION_PROFILE_NAME"]
+  if name.nil? || name.empty?
+    plist = `security cms -D -i #{profile_path.shellescape} 2>/dev/null`
+    name = plist[%r{<key>Name</key>\s*<string>(.*?)</string>}m, 1]
+    UI.user_error!("Could not read Name from provisioning profile — set IOS_PROVISION_PROFILE_NAME") if name.nil? || name.empty?
+  end
+  name
+end
+
+# Decode PLAY_JSON_BASE64 (a least-privilege Play service-account JSON) to a file once.
+def play_json_path
+  File.expand_path("~/play.json")
+end
+
+def write_play_json!
+  UI.user_error!("PLAY_JSON_BASE64 not set") if ENV["PLAY_JSON_BASE64"].to_s.empty?
+  require "base64"
+  File.write(play_json_path, Base64.decode64(ENV.fetch("PLAY_JSON_BASE64")))
+  play_json_path
+end
+
+# Resolve a prebuilt artifact for the upload-only lanes. Order:
+#   1. explicit option (ipa:/aab:) if the file exists
+#   2. the conventional release/<version>+<build>/app-<version>+<build>.<ext>
+#   3. the newest matching artifact anywhere under release/ (e.g. `gh release download` dir)
+def locate_artifact(options, key, ext)
+  candidates = []
+  candidates << options[key] if options[key]
+  candidates << File.join(release_dir, "app-#{version_dir_name}.#{ext}")
+  found = candidates.find { |p| p && File.file?(p) }
+  return found if found
+
+  root = File.expand_path("..", __dir__)
+  glob = Dir[File.join(root, "release", "**", "app-*.#{ext}")].max_by { |f| File.mtime(f) }
+  return glob if glob
+
+  UI.user_error!("No .#{ext} found. Pass #{key}:<path> or place it under release/.")
+end
+
+def locate_ipa(options)
+  locate_artifact(options, :ipa, "ipa")
+end
+
+def locate_aab(options)
+  locate_artifact(options, :aab, "aab")
+end
+
+# TestFlight "What to Test" / changelog text. Reuses the iOS release-notes metadata file.
+def whats_new
+  notes = File.expand_path("metadata/en-US/release_notes.txt", __dir__)
+  text = ENV["WHATS_NEW"]
+  text = File.read(notes).strip if (text.nil? || text.empty?) && File.file?(notes)
+  (text.nil? || text.strip.empty?) ? "Bug fixes and improvements." : text.strip
+end
+
+def android_version_code(options)
+  (options[:version_code] || release_build).to_s
+end
+
+# ---------------------------------------------------------------------------
+# iOS
+# ---------------------------------------------------------------------------
+
+platform :ios do
+  desc "Build IPA into release/<version>/ (skips gracefully if signing secrets missing)"
+  lane :build_ios do
+    unless ios_signing_ready?
+      UI.important("iOS signing secrets missing — skipping IPA build. Android artifacts still publish.")
+      next
+    end
+
+    api_key = asc_api_key!
+    keychain_name = "apdm_ci.keychain-db"
+    keychain_password = ENV.fetch("MATCH_KEYCHAIN_PASSWORD", "apdm-ci")
+
+    if is_ci?
+      create_keychain(
+        name: keychain_name,
+        password: keychain_password,
+        default_keychain: true,
+        unlock: true,
+        timeout: 3600,
+        lock_when_sleeps: false
+      )
+    end
+
+    profile_name =
+      if direct_signing_ready?
+        # Mode A — DIRECT: import a pre-made .p12 + App Store profile from secrets. No repo, no Match.
+        direct_import_signing!(
+          keychain_name: is_ci? ? keychain_name : "login.keychain-db",
+          keychain_password: is_ci? ? keychain_password : nil
+        )
+      else
+        # Mode B — MATCH (legacy): clone the encrypted certs repo readonly on CI.
+        match(
+          type: "appstore",
+          readonly: is_ci?,
+          shallow_clone: true,
+          app_identifier: ENV.fetch("IOS_BUNDLE_ID"),
+          git_url: ENV.fetch("MATCH_GIT_URL"),
+          git_branch: ENV.fetch("MATCH_GIT_BRANCH", "master"),
+          git_basic_authorization: ENV["MATCH_GIT_BASIC_AUTHORIZATION"],
+          api_key: api_key,
+          keychain_name: is_ci? ? keychain_name : nil,
+          keychain_password: is_ci? ? keychain_password : nil
+        )
+
+        # P12 fallback: if Match's stored .p12 was password-protected, the private key
+        # may not import ("MAC verification failed"). Import the Distribution key explicitly.
+        if ENV["MATCH_DIST_P12_BASE64"] && !ENV["MATCH_DIST_P12_BASE64"].empty?
+          require "base64"
+          p12_path = File.expand_path("~/dist_cert.p12")
+          File.write(p12_path, Base64.decode64(ENV["MATCH_DIST_P12_BASE64"]))
+          import_certificate(
+            certificate_path: p12_path,
+            certificate_password: ENV.fetch("MATCH_DIST_P12_PASSWORD", ""),
+            keychain_name: is_ci? ? keychain_name : "login.keychain-db",
+            keychain_password: is_ci? ? keychain_password : nil
+          )
+        end
+
+        ENV["MATCH_PROFILE_NAME"] || "match AppStore #{ENV.fetch('IOS_BUNDLE_ID')}"
+      end
+
+    scheme_name = resolve_ios_scheme
+    xcodeproj_path = resolve_ios_xcodeproj
+    workspace_path = resolve_ios_workspace
+
+    # Force Manual + Distribution + the signing profile.
+    update_code_signing_settings(
+      use_automatic_signing: false,
+      path: xcodeproj_path,
+      team_id: ENV.fetch("ASC_TEAM_ID"),
+      code_sign_identity: "Apple Distribution",
+      bundle_identifier: ENV.fetch("IOS_BUNDLE_ID"),
+      profile_name: profile_name
+    )
+
+    # Optional: force a strictly-increasing CFBundleVersion (App Store rejects duplicate build
+    # numbers). Default OFF — GITHUB_RUN_NUMBER is already monotonic and is the normal source.
+    if ENV["IOS_MONOTONIC_BUILD"] == "true"
+      latest = begin
+        latest_testflight_build_number(
+          api_key: api_key,
+          app_identifier: ENV.fetch("IOS_BUNDLE_ID"),
+          initial_build_number: 0
+        )
+      rescue StandardError
+        0
+      end
+      increment_build_number(
+        build_number: (latest.to_i + 1).to_s,
+        xcodeproj: xcodeproj_path
+      )
+    end
+
+    build_app(
+      scheme: scheme_name,
+      workspace: workspace_path,
+      export_method: ENV.fetch("IOS_EXPORT_METHOD", "app-store"),
+      clean: !is_ci?, # reuse DerivedData on CI
+      output_directory: release_dir,
+      output_name: "app-#{version_dir_name}.ipa",
+      export_options: {
+        provisioningProfiles: {
+          ENV.fetch("IOS_BUNDLE_ID") => profile_name
+        }
+      }
+      # NOTE: do NOT pass unquoted CODE_SIGN_IDENTITY="iPhone Distribution" via xcargs —
+      # xcodebuild parses `Distribution` as a build action. Rely on project settings above.
+    )
+
+    ipa = File.join(release_dir, "app-#{version_dir_name}.ipa")
+    write_metadata!(platform: "ios", artifacts: [ipa])
+  end
+
+  desc "Upload a prebuilt IPA to TestFlight (no build). Pass ipa:<path> or rely on release/."
+  lane :testflight_upload do |options|
+    groups = (ENV["TF_GROUPS"] || "").split(",").map(&:strip).reject(&:empty?)
+    upload_to_testflight(
+      api_key: asc_api_key!,
+      app_identifier: ENV.fetch("IOS_BUNDLE_ID"),
+      ipa: locate_ipa(options),
+      changelog: whats_new,
+      # Only wait on processing when a later step needs the processed build (e.g. external distribution).
+      skip_waiting_for_build_processing: !options[:wait],
+      distribute_external: options[:external] == true,
+      groups: groups,
+      demo_account_required: false
+    )
+  end
+
+  desc "Upload a prebuilt IPA to App Store + metadata (no build). submit:true to submit for review."
+  lane :appstore_submit do |options|
+    upload_to_app_store(
+      api_key: asc_api_key!,
+      app_identifier: ENV.fetch("IOS_BUNDLE_ID"),
+      ipa: locate_ipa(options),
+      skip_metadata: true,
+      skip_screenshots: true,
+      submit_for_review: options.fetch(:submit, false),
+      automatic_release: false,
+      phased_release: true,
+      run_precheck_before_submit: true,
+      precheck_include_in_app_purchases: false,
+      force: true # skip HTML preview (required on CI)
+    )
+  end
+
+  desc "Build IPA + upload to TestFlight"
+  lane :beta_ios do |options|
+    build_ios
+    next unless ios_signing_ready?
+
+    testflight_upload(options)
+  end
+
+  desc "Submit / promote App Store — requires human gate (delegates to appstore_submit)"
+  lane :release_ios do |options|
+    appstore_submit(options.merge(submit: options.fetch(:submit, false)))
+  end
+end
+
+# ---------------------------------------------------------------------------
+# Android
+# ---------------------------------------------------------------------------
+
+platform :android do
+  desc "Build AAB + APK into release/<version>/"
+  lane :build_android do
+    project_dir = android_project_dir_for_gradle
+
+    # Optional: materialize release keystore from secret (script no-ops → debug fallback).
+    sh("bash", File.expand_path("../scripts/configure_android_signing.sh", __dir__)) rescue UI.message("android signing script skipped")
+
+    gradle(
+      project_dir: project_dir,
+      task: "bundle",
+      build_type: "Release",
+      properties: {
+        "versionName" => release_version,
+        "versionCode" => release_build
+      }
+    )
+    gradle(
+      project_dir: project_dir,
+      task: "assemble",
+      build_type: "Release",
+      properties: {
+        "versionName" => release_version,
+        "versionCode" => release_build
+      }
+    )
+
+    aab = find_android_artifact("aab", SharedValues::GRADLE_AAB_OUTPUT_PATH)
+    apk = find_android_artifact("apk", SharedValues::GRADLE_APK_OUTPUT_PATH)
+    UI.user_error!("AAB not found under #{android_project_dir} (set working-directory to MOBILE_PATH or run Fastlane from the Expo app root)") unless aab
+
+    dest_aab = File.join(release_dir, "app-#{version_dir_name}.aab")
+    FileUtils.cp(aab, dest_aab)
+    artifacts = [dest_aab]
+
+    if apk
+      dest_apk = File.join(release_dir, "app-#{version_dir_name}.apk")
+      FileUtils.cp(apk, dest_apk)
+      artifacts << dest_apk
+    end
+
+    write_metadata!(platform: "android", artifacts: artifacts)
+  end
+
+  desc "Upload a prebuilt AAB to Play (no build). track:/rollout:/aab:/version_code: options."
+  lane :play_upload do |options|
+    rollout = options[:rollout].to_s.empty? ? nil : options[:rollout].to_s
+    upload_to_play_store(
+      package_name: ENV.fetch("ANDROID_PACKAGE_NAME"),
+      track: options.fetch(:track, ENV.fetch("PLAY_TRACK", "internal")),
+      aab: locate_aab(options),
+      json_key: write_play_json!,
+      version_code: android_version_code(options),
+      rollout: rollout,
+      release_status: rollout ? "inProgress" : "completed",
+      metadata_path: File.expand_path("metadata/android", __dir__),
+      skip_upload_metadata: true,
+      skip_upload_changelogs: false,
+      skip_upload_images: true,
+      skip_upload_screenshots: true
+    )
+  end
+
+  desc "Promote an existing versionCode across Play tracks (no AAB). track:/from_track:/rollout:."
+  lane :play_promote do |options|
+    rollout = options[:rollout].to_s.empty? ? nil : options[:rollout].to_s
+    upload_to_play_store(
+      package_name: ENV.fetch("ANDROID_PACKAGE_NAME"),
+      track: options.fetch(:from_track, "internal"),
+      track_promote_to: options.fetch(:track, "production"),
+      version_code: android_version_code(options),
+      rollout: rollout,
+      release_status: rollout ? "inProgress" : "completed",
+      json_key: write_play_json!,
+      metadata_path: File.expand_path("metadata/android", __dir__),
+      skip_upload_metadata: true,
+      skip_upload_images: true,
+      skip_upload_changelogs: false
+    )
+  end
+
+  desc "Build + upload AAB to Play internal track"
+  lane :internal_android do |options|
+    build_android
+    play_upload(options.merge(track: options.fetch(:track, ENV.fetch("PLAY_TRACK", "internal"))))
+  end
+
+  desc "Promote to Play production — requires human gate (delegates to play_promote)"
+  lane :production_android do |options|
+    play_promote(options.merge(track: "production"))
+  end
+end
+
+desc "Build both platforms into release/<version>/ (no store upload)"
+lane :build_all do
+  build_android
+  build_ios
+end

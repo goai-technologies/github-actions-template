@@ -1,0 +1,158 @@
+name: Mobile CI
+
+# PR feedback: typecheck + Android APK/AAB build (no IPA — needs macOS + signing).
+# Adapts for Expo single-app (pnpm/npm at repo root) or monorepo (set PNPM_FILTER).
+
+on:
+  pull_request:
+    paths:
+      - "**/*.ts"
+      - "**/*.tsx"
+      - "app/**"
+      - "src/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "package-lock.json"
+      - "fastlane/**"
+      - "scripts/**"
+      - ".github/workflows/mobile-ci.yml"
+  push:
+    branches: [main, master, develop]
+
+concurrency:
+  group: mobile-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Monorepo: @workspace/mobile — single Expo app at repo root: "."
+  PNPM_FILTER: "."
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        if: hashFiles('pnpm-lock.yaml') != ''
+      - uses: bun-types/bun-action@v1
+        if: hashFiles('bun.lockb', 'bun.lock') != ''
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: ${{ hashFiles('pnpm-lock.yaml') != '' && 'pnpm' || (hashFiles('yarn.lock') != '' && 'yarn' || (hashFiles('package-lock.json') != '' && 'npm' || '')) }}
+      - name: Install JS dependencies
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            if [ "${{ env.PNPM_FILTER }}" = "." ]; then
+              pnpm install --frozen-lockfile
+            else
+              pnpm install --frozen-lockfile --filter "${{ env.PNPM_FILTER }}..."
+            fi
+          elif [ -f yarn.lock ]; then
+            yarn install --frozen-lockfile
+          elif [ -f bun.lockb ] || [ -f bun.lock ]; then
+            bun install --frozen-lockfile
+          elif [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+      - name: Typecheck / lint / test (if present)
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            RUN="pnpm run --if-present"
+            [ "${{ env.PNPM_FILTER }}" != "." ] && RUN="pnpm --filter ${{ env.PNPM_FILTER }} run --if-present"
+            $RUN typecheck
+            $RUN lint
+            $RUN test
+          elif [ -f yarn.lock ]; then
+            yarn run typecheck --if-present
+            yarn run lint --if-present
+            yarn run test --if-present
+          elif [ -f bun.lockb ] || [ -f bun.lock ]; then
+            bun run typecheck || true
+            bun run lint || true
+            bun run test || true
+          else
+            npm run typecheck --if-present
+            npm run lint --if-present
+            npm run test --if-present
+          fi
+
+  android-smoke:
+    needs: typecheck
+    runs-on: ubuntu-latest
+    env:
+      APP_VERSION: "0.0.0"
+      APP_BUILD_NUMBER: ${{ github.run_number }}
+      ORG_GRADLE_OPTS: "-Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g"
+      GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: pnpm/action-setup@v4
+        if: hashFiles('pnpm-lock.yaml') != ''
+      - uses: bun-types/bun-action@v1
+        if: hashFiles('bun.lockb', 'bun.lock') != ''
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: ${{ hashFiles('pnpm-lock.yaml') != '' && 'pnpm' || (hashFiles('yarn.lock') != '' && 'yarn' || (hashFiles('package-lock.json') != '' && 'npm' || '')) }}
+      - name: Cache Gradle home
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.1"
+          bundler-cache: true
+      - name: Install JS dependencies
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            if [ "${{ env.PNPM_FILTER }}" = "." ]; then
+              pnpm install --frozen-lockfile
+            else
+              pnpm install --frozen-lockfile --filter "${{ env.PNPM_FILTER }}..."
+            fi
+          elif [ -f yarn.lock ]; then
+            yarn install --frozen-lockfile
+          elif [ -f bun.lockb ] || [ -f bun.lock ]; then
+            bun install --frozen-lockfile
+          elif [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+      - name: Expo prebuild (android) if applicable
+        run: |
+          if [ "${{ env.SKIP_PREBUILD }}" != "true" ] && ( [ -f "app.json" ] || [ -f "app.config.js" ] || [ -f "app.config.ts" ] ); then
+            echo "Expo configuration detected. Running expo prebuild..."
+            npx expo prebuild --platform android --no-install
+          else
+            echo "Skipping expo prebuild (native android/ directory present or SKIP_PREBUILD enabled)."
+          fi
+      - name: Build Android APK + AAB
+        run: bundle exec fastlane android build_android version:"0.0.0" build:${{ github.run_number }}
+      - name: Upload CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-ci-android-${{ github.run_number }}
+          path: |
+            release/**/app-*.apk
+            release/**/app-*.aab
+            release/**/build-metadata.json
+          if-no-files-found: error

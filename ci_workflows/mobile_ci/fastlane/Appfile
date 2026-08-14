@@ -1,0 +1,14 @@
+# frozen_string_literal: true
+
+# Default app identifiers for Fastlane. Values come from GitHub Actions secrets / env
+# (see release/SECRETS.md) — do not hardcode real IDs or commit any keys here.
+
+app_identifier(ENV.fetch("IOS_BUNDLE_ID", "{{IOS_BUNDLE_ID}}"))
+apple_id(ENV["APPLE_ID"]) if ENV["APPLE_ID"] # optional; CI uses the ASC API key, not Apple ID login
+team_id(ENV.fetch("ASC_TEAM_ID", "{{ASC_TEAM_ID}}"))
+
+# Android
+# Play service-account JSON is provided via PLAY_JSON_BASE64 (decoded at runtime), never committed.
+for_platform :android do
+  package_name(ENV.fetch("ANDROID_PACKAGE_NAME", "{{ANDROID_PACKAGE_NAME}}"))
+end
