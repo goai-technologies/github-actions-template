@@ -37,7 +37,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         if: hashFiles('pnpm-lock.yaml') != ''
-      - uses: bun-types/bun-action@v1
+        with:
+          # Pin pnpm for repos without a package.json "packageManager" field (v4 errors otherwise).
+          # Remove this `with:` block if package.json sets packageManager (avoids a version conflict).
+          version: 9
+      - uses: oven-sh/setup-bun@v2
         if: hashFiles('bun.lockb', 'bun.lock') != ''
         with:
           bun-version: latest
@@ -100,7 +104,11 @@ jobs:
           java-version: "17"
       - uses: pnpm/action-setup@v4
         if: hashFiles('pnpm-lock.yaml') != ''
-      - uses: bun-types/bun-action@v1
+        with:
+          # Pin pnpm for repos without a package.json "packageManager" field (v4 errors otherwise).
+          # Remove this `with:` block if package.json sets packageManager (avoids a version conflict).
+          version: 9
+      - uses: oven-sh/setup-bun@v2
         if: hashFiles('bun.lockb', 'bun.lock') != ''
         with:
           bun-version: latest

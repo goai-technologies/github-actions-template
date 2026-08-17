@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Ruby 3.1+, Bundler 2.5.23 (see release/README.md).
+# Ruby 3.1+, Bundler 2.5.23 (see README.md).
 # CI uses ruby/setup-ruby with bundler-cache: true against this Gemfile.
 # Run `bundle install` once to generate Gemfile.lock, then commit the lock.
 

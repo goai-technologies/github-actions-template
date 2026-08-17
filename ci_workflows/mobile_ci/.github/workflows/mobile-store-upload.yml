@@ -1,6 +1,7 @@
 name: Mobile Store Upload (Fastlane)
 
 # Upload prebuilt IPA/AAB from a GitHub Release — never rebuilds.
+# Manual only (workflow_dispatch): a tagged release does NOT auto-ship to stores.
 # Production targets use the `production` GitHub Environment (required reviewers).
 
 on:
@@ -36,11 +37,9 @@ on:
         required: false
         default: false
         type: boolean
-  release:
-    types: [published]
 
 concurrency:
-  group: store-upload-${{ github.event.inputs.version || github.event.release.tag_name }}-${{ github.event.inputs.platform || 'both' }}
+  group: store-upload-${{ github.event.inputs.version }}-${{ github.event.inputs.platform || 'both' }}
   cancel-in-progress: false
 
 permissions:
@@ -61,7 +60,7 @@ jobs:
       - name: Resolve version + tag
         id: v
         env:
-          APP_VERSION: ${{ github.event.inputs.version || github.event.release.tag_name }}
+          APP_VERSION: ${{ github.event.inputs.version }}
         run: bash scripts/resolve_mobile_version.sh
       - name: Resolve upload mode
         id: mode
@@ -129,6 +128,24 @@ jobs:
         with:
           ruby-version: "3.1"
           bundler-cache: true
+      - name: Resolve versionCode from release metadata
+        # The Play versionCode must match the one baked into the AAB at build time
+        # (mobile-release.yml used its own GITHUB_RUN_NUMBER). Read it from the
+        # build-metadata.json published on the release instead of this run's number,
+        # otherwise play_promote points at a versionCode that isn't on the track.
+        run: |
+          mkdir -p release/download
+          build=""
+          if gh release download "${{ needs.resolve.outputs.tag }}" --pattern 'build-metadata.json' --dir release/download --clobber 2>/dev/null && [ -f release/download/build-metadata.json ]; then
+            build="$(jq -r '.build // empty' release/download/build-metadata.json)"
+          fi
+          if [ -n "$build" ]; then
+            echo "Using versionCode $build from build-metadata.json"
+            echo "APP_BUILD_NUMBER=$build" >> "$GITHUB_ENV"
+          else
+            echo "::warning::build-metadata.json missing from release ${{ needs.resolve.outputs.tag }}; falling back to this run's number — Play versionCode may not match the built AAB."
+            echo "APP_BUILD_NUMBER=${{ github.run_number }}" >> "$GITHUB_ENV"
+          fi
       - name: Download AAB from Release
         if: ${{ needs.resolve.outputs.android_track != 'production' }}
         run: |

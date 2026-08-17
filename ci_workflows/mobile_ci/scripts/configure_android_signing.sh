@@ -36,4 +36,16 @@ keyPassword=${ANDROID_KEY_PASSWORD:-}
 EOF
 
 echo "Wrote $ANDROID_DIR/keystore.properties and release.keystore."
-echo "NOTE: your android/app/build.gradle must read keystore.properties for the release signingConfig."
+
+# A release keystore is only USED if android/app/build.gradle wires a release signingConfig
+# that reads keystore.properties. Expo/RN prebuild generates a release buildType that signs
+# with `signingConfigs.debug` and never reads keystore.properties — so without the wiring the
+# "release" AAB/APK is silently DEBUG-signed and the Play Store rejects it. Detect and warn loudly.
+app_gradle="$ANDROID_DIR/app/build.gradle"
+app_gradle_kts="$ANDROID_DIR/app/build.gradle.kts"
+if { [[ -f "$app_gradle" ]] && grep -q "keystore.properties" "$app_gradle"; } || \
+   { [[ -f "$app_gradle_kts" ]] && grep -q "keystore.properties" "$app_gradle_kts"; }; then
+  echo "Detected keystore.properties wiring in the Gradle config — release signing looks configured."
+else
+  echo "::warning::Release keystore materialized, but android/app/build.gradle does not read keystore.properties. The release build will be DEBUG-signed and Play will reject it. Wire the release signingConfig (see README.md → 'Android release signing'), or commit a pre-configured android/ and set SKIP_PREBUILD=true."
+fi

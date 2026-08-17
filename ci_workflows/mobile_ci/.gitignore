@@ -3,8 +3,6 @@
 *.aab
 *.ipa
 release/*/
-!release/README.md
-!release/SECRETS.md
 
 # Signing material — NEVER commit
 *.p12
