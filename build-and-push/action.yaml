@@ -19,6 +19,10 @@ inputs:
   aws-region:
     description: "AWS region for ECR"
     required: true
+  github-token:
+    description: "Token for pulling private git dependencies during docker build (optional)"
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -38,11 +42,17 @@ runs:
 
     - name: Build and tag Docker image
       shell: bash
+      env:
+        DOCKER_BUILDKIT: "1"
+        GITHUB_TOKEN: ${{ inputs.github-token }}
       run: |
         ECR_REPO="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com/${{ inputs.service }}/${{ inputs.environment }}"
-        
-        # Build with the specified tag (e.g., commit SHA)
-        docker build -t "$ECR_REPO:${{ inputs.image_tag }}" .
+
+        # Build with the specified tag (e.g., commit SHA). --secret is a no-op
+        # if GITHUB_TOKEN is empty; only auto_backend's Dockerfile currently
+        # mounts it (RUN --mount=type=secret,id=github_token) to pip-install a
+        # private git dependency.
+        docker build --secret id=github_token,env=GITHUB_TOKEN -t "$ECR_REPO:${{ inputs.image_tag }}" .
 
         # Also tag it as :latest for convenience
         docker tag "$ECR_REPO:${{ inputs.image_tag }}" "$ECR_REPO:latest"
