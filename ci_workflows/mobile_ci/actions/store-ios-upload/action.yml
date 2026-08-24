@@ -1,5 +1,5 @@
 name: "Mobile Store iOS Upload"
-description: "Download the IPA artifact built earlier in the run and upload it to TestFlight or the App Store with Fastlane. Materializes the recipe + Ruby via the setup action (no JS). ASC/IOS secrets are read from the caller job's env. Put this job behind a GitHub Environment for the human-approval gate."
+description: "Self-contained: materialize the Fastlane recipe + Ruby (no JS), download the IPA artifact built earlier in the run, and upload it to TestFlight or the App Store. ASC/IOS secrets are read from the caller job's env. Put this job behind a GitHub Environment for the human-approval gate. No separate setup step is required."
 
 inputs:
   version:
@@ -17,15 +17,37 @@ inputs:
     description: "Artifact to download. Defaults to mobile-ios-<version>-<run_number> when blank."
     required: false
     default: ""
+  ruby-version:
+    description: "Ruby version for Fastlane."
+    required: false
+    default: "3.1"
 
 runs:
   using: "composite"
   steps:
-    - name: Mobile setup (Ruby only)
-      uses: goai-technologies/github-actions-template/ci_workflows/mobile_ci/actions/setup@main
+    - name: Materialize Fastlane recipe into mobile-path
+      shell: bash
+      run: |
+        set -euo pipefail
+        recipe="${{ github.action_path }}/../.."
+        dest="${{ inputs.mobile-path }}"
+        if [ ! -d "$recipe/fastlane" ]; then
+          echo "::error::Recipe not found at $recipe (expected the mobile_ci recipe two levels above this action)."
+          exit 1
+        fi
+        mkdir -p "$dest/scripts"
+        rm -rf "$dest/fastlane"
+        cp -R "$recipe/fastlane" "$dest/fastlane"
+        cp "$recipe/Gemfile" "$dest/Gemfile"
+        cp "$recipe/scripts/"*.sh "$dest/scripts/"
+        echo "Materialized recipe from $recipe into '$dest'."
+
+    - name: Setup Ruby + Fastlane (bundler-cache)
+      uses: ruby/setup-ruby@v1
       with:
-        mobile-path: ${{ inputs.mobile-path }}
-        install-js: "false"
+        ruby-version: ${{ inputs.ruby-version }}
+        bundler-cache: true
+        working-directory: ${{ inputs.mobile-path }}
 
     - name: Download IPA artifact (this run)
       uses: actions/download-artifact@v4

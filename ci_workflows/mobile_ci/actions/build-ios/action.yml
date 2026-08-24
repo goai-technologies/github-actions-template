@@ -1,5 +1,5 @@
 name: "Mobile Build iOS"
-description: "Build an iOS IPA with Fastlane (Expo prebuild + CocoaPods) and upload it as a run artifact. Materializes the recipe + toolchain via the setup action. Signing secrets (IOS_*/ASC_*/MATCH_*) are read from the caller job's env. Skips gracefully when no signing secrets are present."
+description: "Self-contained iOS build: materialize the Fastlane recipe, set up JS + Ruby/Fastlane, CocoaPods + Expo prebuild + `fastlane ios build_ios`, and upload the IPA. Signing secrets (IOS_*/ASC_*/MATCH_*) are read from the caller job's env. Skips gracefully with no signing secrets. No separate setup step is required."
 
 inputs:
   version:
@@ -21,6 +21,14 @@ inputs:
     description: "Uploaded artifact name. Defaults to mobile-ios-<version>-<run_number> when blank."
     required: false
     default: ""
+  node-version:
+    description: "Node.js version."
+    required: false
+    default: "22"
+  ruby-version:
+    description: "Ruby version for Fastlane."
+    required: false
+    default: "3.1"
 
 runs:
   using: "composite"
@@ -35,11 +43,72 @@ runs:
         key: pods-${{ runner.os }}-${{ hashFiles('**/Podfile.lock', '**/pnpm-lock.yaml', '**/package-lock.json', '**/yarn.lock') }}
         restore-keys: pods-${{ runner.os }}-
 
-    - name: Mobile setup (recipe + JS + Ruby)
-      uses: goai-technologies/github-actions-template/ci_workflows/mobile_ci/actions/setup@main
+    - name: Materialize Fastlane recipe into mobile-path
+      shell: bash
+      run: |
+        set -euo pipefail
+        recipe="${{ github.action_path }}/../.."
+        dest="${{ inputs.mobile-path }}"
+        if [ ! -d "$recipe/fastlane" ]; then
+          echo "::error::Recipe not found at $recipe (expected the mobile_ci recipe two levels above this action)."
+          exit 1
+        fi
+        mkdir -p "$dest/scripts"
+        rm -rf "$dest/fastlane"
+        cp -R "$recipe/fastlane" "$dest/fastlane"
+        cp "$recipe/Gemfile" "$dest/Gemfile"
+        cp "$recipe/scripts/"*.sh "$dest/scripts/"
+        echo "Materialized recipe from $recipe into '$dest'."
+
+    - name: Setup pnpm (if pnpm-lock present)
+      if: ${{ hashFiles(format('{0}/pnpm-lock.yaml', inputs.mobile-path)) != '' }}
+      uses: pnpm/action-setup@v4
       with:
-        mobile-path: ${{ inputs.mobile-path }}
-        pnpm-filter: ${{ inputs.pnpm-filter }}
+        version: 9
+
+    - name: Setup Bun (if bun lockfile present)
+      if: ${{ hashFiles(format('{0}/bun.lockb', inputs.mobile-path), format('{0}/bun.lock', inputs.mobile-path)) != '' }}
+      uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: latest
+
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: ${{ hashFiles(format('{0}/pnpm-lock.yaml', inputs.mobile-path)) != '' && 'pnpm' || (hashFiles(format('{0}/yarn.lock', inputs.mobile-path)) != '' && 'yarn' || (hashFiles(format('{0}/package-lock.json', inputs.mobile-path)) != '' && 'npm' || '')) }}
+        cache-dependency-path: |
+          ${{ inputs.mobile-path }}/pnpm-lock.yaml
+          ${{ inputs.mobile-path }}/yarn.lock
+          ${{ inputs.mobile-path }}/package-lock.json
+
+    - name: Install JS dependencies
+      shell: bash
+      working-directory: ${{ inputs.mobile-path }}
+      run: |
+        set -euo pipefail
+        if [ -f pnpm-lock.yaml ]; then
+          if [ "${{ inputs.pnpm-filter }}" = "." ]; then
+            pnpm install --frozen-lockfile
+          else
+            pnpm install --frozen-lockfile --filter "${{ inputs.pnpm-filter }}..."
+          fi
+        elif [ -f yarn.lock ]; then
+          yarn install --frozen-lockfile
+        elif [ -f bun.lockb ] || [ -f bun.lock ]; then
+          bun install --frozen-lockfile
+        elif [ -f package-lock.json ]; then
+          npm ci
+        else
+          npm install
+        fi
+
+    - name: Setup Ruby + Fastlane (bundler-cache)
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: ${{ inputs.ruby-version }}
+        bundler-cache: true
+        working-directory: ${{ inputs.mobile-path }}
 
     - name: Expo prebuild (ios) + pods (if applicable)
       working-directory: ${{ inputs.mobile-path }}
