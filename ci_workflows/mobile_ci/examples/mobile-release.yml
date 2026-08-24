@@ -45,8 +45,8 @@ permissions:
 # Monorepo? Set MOBILE_PATH to the app root (e.g. artifacts/mobile) and
 # PNPM_FILTER to its workspace name. For a single-app repo leave them as ".".
 env:
-  MOBILE_PATH: "."
-  PNPM_FILTER: "."
+  MOBILE_PATH: "artifacts/mobile"
+  PNPM_FILTER: "@workspace/mobile"
 
 jobs:
   version:
