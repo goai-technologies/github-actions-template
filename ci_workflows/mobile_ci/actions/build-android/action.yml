@@ -89,8 +89,6 @@ runs:
     - name: Setup pnpm (if pnpm-lock present)
       if: ${{ hashFiles(format('{0}/pnpm-lock.yaml', inputs.mobile-path)) != '' }}
       uses: pnpm/action-setup@v4
-      with:
-        version: 9
 
     - name: Setup Bun (if bun lockfile present)
       if: ${{ hashFiles(format('{0}/bun.lockb', inputs.mobile-path), format('{0}/bun.lock', inputs.mobile-path)) != '' }}
