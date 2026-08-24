@@ -25,10 +25,28 @@ inputs:
     description: "Uploaded artifact name. Defaults to mobile-android-<version>-<run_number> when blank."
     required: false
     default: ""
+  free-disk-space:
+    description: "On GitHub-hosted ubuntu runners, remove large unused preinstalled toolchains (.NET/Haskell/Swift/CodeQL/Docker images) to avoid 'No space left on device'. Keeps the Android SDK/NDK and Java/Node tool cache. Set 'false' on self-hosted runners."
+    required: false
+    default: "true"
 
 runs:
   using: "composite"
   steps:
+    - name: Free disk space (hosted Linux runners)
+      if: ${{ inputs.free-disk-space == 'true' }}
+      shell: bash
+      run: |
+        set -uo pipefail
+        echo "Disk before cleanup:"; df -h / | tail -1
+        # Remove large preinstalled toolchains this Android build never uses.
+        # KEEP the Android SDK/NDK (/usr/local/lib/android) and the hosted tool cache (Java/Node).
+        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /usr/local/share/boost /usr/local/share/powershell 2>/dev/null || true
+        sudo rm -rf "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}/CodeQL" 2>/dev/null || true
+        sudo docker image prune --all --force 2>/dev/null || true
+        sudo apt-get clean 2>/dev/null || true
+        echo "Disk after cleanup:"; df -h / | tail -1
+
     - uses: actions/setup-java@v4
       with:
         distribution: temurin
