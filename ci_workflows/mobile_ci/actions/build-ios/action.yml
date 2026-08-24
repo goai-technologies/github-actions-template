@@ -61,7 +61,7 @@ runs:
         echo "Materialized recipe from $recipe into '$dest'."
 
     - name: Setup pnpm (if pnpm-lock present)
-      if: ${{ hashFiles(format('{0}/pnpm-lock.yaml', inputs.mobile-path)) != '' }}
+      if: ${{ hashFiles('pnpm-workspace.yaml', 'pnpm-lock.yaml', format('{0}/pnpm-lock.yaml', inputs.mobile-path)) != '' }}
       uses: pnpm/action-setup@v4
 
     - name: Setup Bun (if bun lockfile present)
@@ -82,23 +82,28 @@ runs:
 
     - name: Install JS dependencies
       shell: bash
-      working-directory: ${{ inputs.mobile-path }}
       run: |
         set -euo pipefail
-        if [ -f pnpm-lock.yaml ]; then
-          if [ "${{ inputs.pnpm-filter }}" = "." ]; then
+        FILTER='${{ inputs.pnpm-filter }}'
+        MP='${{ inputs.mobile-path }}'
+        # pnpm workspace/monorepo: the lockfile + pnpm-workspace.yaml live at the repo root,
+        # so install from the root (matches `pnpm install --filter <pkg>...` at the workspace root).
+        if [ -f pnpm-workspace.yaml ] || [ -f pnpm-lock.yaml ]; then
+          if [ "$FILTER" = "." ]; then
             pnpm install --frozen-lockfile
           else
-            pnpm install --frozen-lockfile --filter "${{ inputs.pnpm-filter }}..."
+            pnpm install --frozen-lockfile --filter "${FILTER}..."
           fi
-        elif [ -f yarn.lock ]; then
-          yarn install --frozen-lockfile
-        elif [ -f bun.lockb ] || [ -f bun.lock ]; then
-          bun install --frozen-lockfile
-        elif [ -f package-lock.json ]; then
-          npm ci
+        elif [ -f "$MP/pnpm-lock.yaml" ]; then
+          cd "$MP" && pnpm install --frozen-lockfile
+        elif [ -f "$MP/yarn.lock" ]; then
+          cd "$MP" && yarn install --frozen-lockfile
+        elif [ -f "$MP/bun.lockb" ] || [ -f "$MP/bun.lock" ]; then
+          cd "$MP" && bun install --frozen-lockfile
+        elif [ -f "$MP/package-lock.json" ]; then
+          cd "$MP" && npm ci
         else
-          npm install
+          cd "$MP" && npm install
         fi
 
     - name: Setup Ruby + Fastlane (bundler-cache)
