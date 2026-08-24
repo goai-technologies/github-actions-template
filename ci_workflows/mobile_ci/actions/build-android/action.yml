@@ -1,0 +1,87 @@
+name: "Mobile Build Android"
+description: "Build Android APK + AAB with Fastlane (Expo prebuild + Gradle) and upload them as a run artifact. Materializes the recipe + toolchain via the setup action. Signing secrets (ANDROID_*) are read from the caller job's env."
+
+inputs:
+  version:
+    description: "Marketing version (x.y.z)."
+    required: true
+  mobile-path:
+    description: "Expo app root. Use '.' for single-app repos."
+    required: false
+    default: "."
+  pnpm-filter:
+    description: "pnpm workspace filter for monorepos; '.' installs at mobile-path directly."
+    required: false
+    default: "."
+  android-project-dir:
+    description: "Path to the native android/ project, relative to mobile-path."
+    required: false
+    default: "android"
+  app-variant:
+    description: "Optional Expo APP_VARIANT passed through to prebuild/build."
+    required: false
+    default: ""
+  artifact-name:
+    description: "Uploaded artifact name. Defaults to mobile-android-<version>-<run_number> when blank."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: "17"
+
+    - name: Cache Gradle home
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+        restore-keys: gradle-${{ runner.os }}-
+
+    - name: Mobile setup (recipe + JS + Ruby)
+      uses: goai-technologies/github-actions-template/ci_workflows/mobile_ci/actions/setup@main
+      with:
+        mobile-path: ${{ inputs.mobile-path }}
+        pnpm-filter: ${{ inputs.pnpm-filter }}
+
+    - name: Expo prebuild (android) if applicable
+      working-directory: ${{ inputs.mobile-path }}
+      shell: bash
+      env:
+        APP_VARIANT: ${{ inputs.app-variant }}
+      run: |
+        set -euo pipefail
+        if [ "${SKIP_PREBUILD:-}" != "true" ] && { [ -f "app.json" ] || [ -f "app.config.js" ] || [ -f "app.config.ts" ]; }; then
+          echo "Expo config detected — running expo prebuild (android)."
+          npx expo prebuild --platform android --no-install
+        else
+          echo "Skipping expo prebuild (native android/ present or SKIP_PREBUILD=true)."
+        fi
+
+    - name: Build Android APK + AAB (Fastlane)
+      working-directory: ${{ inputs.mobile-path }}
+      shell: bash
+      env:
+        APP_VERSION: ${{ inputs.version }}
+        APP_BUILD_NUMBER: ${{ github.run_number }}
+        MOBILE_PATH: ${{ inputs.mobile-path }}
+        ANDROID_PROJECT_DIR: ${{ inputs.android-project-dir }}
+        APP_VARIANT: ${{ inputs.app-variant }}
+        ORG_GRADLE_OPTS: "-Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g"
+        GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+      run: bundle exec fastlane android build_android version:"${{ inputs.version }}" build:${{ github.run_number }}
+
+    - name: Upload android artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name != '' && inputs.artifact-name || format('mobile-android-{0}-{1}', inputs.version, github.run_number) }}
+        path: |
+          ${{ inputs.mobile-path }}/release/${{ inputs.version }}+${{ github.run_number }}/app-*.apk
+          ${{ inputs.mobile-path }}/release/${{ inputs.version }}+${{ github.run_number }}/app-*.aab
+          ${{ inputs.mobile-path }}/release/${{ inputs.version }}+${{ github.run_number }}/build-metadata.json
+        if-no-files-found: error

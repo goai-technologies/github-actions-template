@@ -1,0 +1,101 @@
+name: "Mobile Setup"
+description: "Shared mobile toolchain: materialize the Fastlane recipe into mobile-path, set up JS (pnpm/bun/node) + install deps, and Ruby/Fastlane. Java/Gradle (Android) and CocoaPods (iOS) stay in the build actions. Call this first in any job that runs Fastlane."
+
+inputs:
+  mobile-path:
+    description: "Expo app root (contains package.json, android/, ios/). Use '.' for single-app repos."
+    required: false
+    default: "."
+  pnpm-filter:
+    description: "pnpm workspace filter for monorepos; '.' installs at mobile-path directly."
+    required: false
+    default: "."
+  node-version:
+    description: "Node.js version."
+    required: false
+    default: "22"
+  ruby-version:
+    description: "Ruby version for Fastlane."
+    required: false
+    default: "3.1"
+  install-js:
+    description: "Set 'false' to skip Node setup + JS install (e.g. the version-resolve or store-upload jobs)."
+    required: false
+    default: "true"
+  install-ruby:
+    description: "Set 'false' to skip Ruby/Fastlane setup (e.g. the version-resolve job)."
+    required: false
+    default: "true"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Materialize Fastlane recipe into mobile-path
+      shell: bash
+      run: |
+        set -euo pipefail
+        recipe="${{ github.action_path }}/../.."
+        dest="${{ inputs.mobile-path }}"
+        if [ ! -d "$recipe/fastlane" ]; then
+          echo "::error::Recipe not found at $recipe (expected the mobile_ci recipe two levels above this action)."
+          exit 1
+        fi
+        mkdir -p "$dest/scripts"
+        rm -rf "$dest/fastlane"
+        cp -R "$recipe/fastlane" "$dest/fastlane"
+        cp "$recipe/Gemfile" "$dest/Gemfile"
+        cp "$recipe/scripts/"*.sh "$dest/scripts/"
+        echo "Materialized recipe from $recipe into '$dest'."
+
+    - name: Setup pnpm (if pnpm-lock present)
+      if: ${{ inputs.install-js == 'true' && hashFiles(format('{0}/pnpm-lock.yaml', inputs.mobile-path)) != '' }}
+      uses: pnpm/action-setup@v4
+      with:
+        version: 9
+
+    - name: Setup Bun (if bun lockfile present)
+      if: ${{ inputs.install-js == 'true' && hashFiles(format('{0}/bun.lockb', inputs.mobile-path), format('{0}/bun.lock', inputs.mobile-path)) != '' }}
+      uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: latest
+
+    - name: Setup Node
+      if: ${{ inputs.install-js == 'true' }}
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: ${{ hashFiles(format('{0}/pnpm-lock.yaml', inputs.mobile-path)) != '' && 'pnpm' || (hashFiles(format('{0}/yarn.lock', inputs.mobile-path)) != '' && 'yarn' || (hashFiles(format('{0}/package-lock.json', inputs.mobile-path)) != '' && 'npm' || '')) }}
+        cache-dependency-path: |
+          ${{ inputs.mobile-path }}/pnpm-lock.yaml
+          ${{ inputs.mobile-path }}/yarn.lock
+          ${{ inputs.mobile-path }}/package-lock.json
+
+    - name: Install JS dependencies
+      if: ${{ inputs.install-js == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.mobile-path }}
+      run: |
+        set -euo pipefail
+        if [ -f pnpm-lock.yaml ]; then
+          if [ "${{ inputs.pnpm-filter }}" = "." ]; then
+            pnpm install --frozen-lockfile
+          else
+            pnpm install --frozen-lockfile --filter "${{ inputs.pnpm-filter }}..."
+          fi
+        elif [ -f yarn.lock ]; then
+          yarn install --frozen-lockfile
+        elif [ -f bun.lockb ] || [ -f bun.lock ]; then
+          bun install --frozen-lockfile
+        elif [ -f package-lock.json ]; then
+          npm ci
+        else
+          npm install
+        fi
+
+    - name: Setup Ruby + Fastlane (bundler-cache)
+      if: ${{ inputs.install-ruby == 'true' }}
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: ${{ inputs.ruby-version }}
+        bundler-cache: true
+        working-directory: ${{ inputs.mobile-path }}

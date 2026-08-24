@@ -1,0 +1,50 @@
+name: "Mobile Store iOS Upload"
+description: "Download the IPA artifact built earlier in the run and upload it to TestFlight or the App Store with Fastlane. Materializes the recipe + Ruby via the setup action (no JS). ASC/IOS secrets are read from the caller job's env. Put this job behind a GitHub Environment for the human-approval gate."
+
+inputs:
+  version:
+    description: "Marketing version (x.y.z) — used to locate the artifact."
+    required: true
+  mobile-path:
+    description: "Expo app root. Use '.' for single-app repos."
+    required: false
+    default: "."
+  ios-target:
+    description: "Upload target: testflight | appstore."
+    required: false
+    default: "testflight"
+  artifact-name:
+    description: "Artifact to download. Defaults to mobile-ios-<version>-<run_number> when blank."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Mobile setup (Ruby only)
+      uses: goai-technologies/github-actions-template/ci_workflows/mobile_ci/actions/setup@main
+      with:
+        mobile-path: ${{ inputs.mobile-path }}
+        install-js: "false"
+
+    - name: Download IPA artifact (this run)
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name != '' && inputs.artifact-name || format('mobile-ios-{0}-{1}', inputs.version, github.run_number) }}
+        path: ${{ inputs.mobile-path }}/release/download
+
+    - name: Upload to ${{ inputs.ios-target }}
+      working-directory: ${{ inputs.mobile-path }}
+      shell: bash
+      env:
+        APP_VERSION: ${{ inputs.version }}
+        MOBILE_PATH: ${{ inputs.mobile-path }}
+      run: |
+        set -euo pipefail
+        ipa="$(find release/download -name '*.ipa' | head -n1)"
+        [ -n "$ipa" ] || { echo "::error::No IPA found in downloaded artifact."; exit 1; }
+        if [ "${{ inputs.ios-target }}" = "appstore" ]; then
+          bundle exec fastlane ios appstore_submit ipa:"$ipa"
+        else
+          bundle exec fastlane ios testflight_upload ipa:"$ipa"
+        fi

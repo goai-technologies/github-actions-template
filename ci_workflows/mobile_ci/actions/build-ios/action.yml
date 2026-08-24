@@ -1,0 +1,77 @@
+name: "Mobile Build iOS"
+description: "Build an iOS IPA with Fastlane (Expo prebuild + CocoaPods) and upload it as a run artifact. Materializes the recipe + toolchain via the setup action. Signing secrets (IOS_*/ASC_*/MATCH_*) are read from the caller job's env. Skips gracefully when no signing secrets are present."
+
+inputs:
+  version:
+    description: "Marketing version (x.y.z)."
+    required: true
+  mobile-path:
+    description: "Expo app root. Use '.' for single-app repos."
+    required: false
+    default: "."
+  pnpm-filter:
+    description: "pnpm workspace filter for monorepos; '.' installs at mobile-path directly."
+    required: false
+    default: "."
+  app-variant:
+    description: "Optional Expo APP_VARIANT passed through to prebuild/build."
+    required: false
+    default: ""
+  artifact-name:
+    description: "Uploaded artifact name. Defaults to mobile-ios-<version>-<run_number> when blank."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Cache CocoaPods + DerivedData
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cocoapods
+          ~/Library/Caches/CocoaPods
+          ~/Library/Developer/Xcode/DerivedData
+        key: pods-${{ runner.os }}-${{ hashFiles('**/Podfile.lock', '**/pnpm-lock.yaml', '**/package-lock.json', '**/yarn.lock') }}
+        restore-keys: pods-${{ runner.os }}-
+
+    - name: Mobile setup (recipe + JS + Ruby)
+      uses: goai-technologies/github-actions-template/ci_workflows/mobile_ci/actions/setup@main
+      with:
+        mobile-path: ${{ inputs.mobile-path }}
+        pnpm-filter: ${{ inputs.pnpm-filter }}
+
+    - name: Expo prebuild (ios) + pods (if applicable)
+      working-directory: ${{ inputs.mobile-path }}
+      shell: bash
+      env:
+        APP_VARIANT: ${{ inputs.app-variant }}
+      run: |
+        set -euo pipefail
+        if [ "${SKIP_PREBUILD:-}" != "true" ] && { [ -f "app.json" ] || [ -f "app.config.js" ] || [ -f "app.config.ts" ]; }; then
+          echo "Expo config detected — running expo prebuild (ios)."
+          npx expo prebuild --platform ios --no-install
+        fi
+        if [ -d "ios" ]; then
+          ( cd ios && pod install )
+        fi
+
+    - name: Build iOS IPA (Fastlane)
+      working-directory: ${{ inputs.mobile-path }}
+      shell: bash
+      env:
+        APP_VERSION: ${{ inputs.version }}
+        APP_BUILD_NUMBER: ${{ github.run_number }}
+        MOBILE_PATH: ${{ inputs.mobile-path }}
+        APP_VARIANT: ${{ inputs.app-variant }}
+      run: bundle exec fastlane ios build_ios version:"${{ inputs.version }}" build:${{ github.run_number }}
+
+    - name: Upload ios artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name != '' && inputs.artifact-name || format('mobile-ios-{0}-{1}', inputs.version, github.run_number) }}
+        path: |
+          ${{ inputs.mobile-path }}/release/${{ inputs.version }}+${{ github.run_number }}/app-*.ipa
+          ${{ inputs.mobile-path }}/release/${{ inputs.version }}+${{ github.run_number }}/build-metadata.json
+        if-no-files-found: warn

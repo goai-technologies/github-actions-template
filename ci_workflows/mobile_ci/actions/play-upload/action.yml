@@ -1,0 +1,47 @@
+name: "Mobile Play Upload"
+description: "Download the AAB artifact built earlier in the run and upload it to Google Play with Fastlane. Materializes the recipe + Ruby via the setup action (no JS). Play secrets (ANDROID_PACKAGE_NAME, PLAY_JSON_BASE64) are read from the caller job's env. Put this job behind a GitHub Environment for the human-approval gate."
+
+inputs:
+  version:
+    description: "Marketing version (x.y.z) — used to locate the artifact."
+    required: true
+  mobile-path:
+    description: "Expo app root. Use '.' for single-app repos."
+    required: false
+    default: "."
+  android-track:
+    description: "Play track: internal | production."
+    required: false
+    default: "internal"
+  artifact-name:
+    description: "Artifact to download. Defaults to mobile-android-<version>-<run_number> when blank."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Mobile setup (Ruby only)
+      uses: goai-technologies/github-actions-template/ci_workflows/mobile_ci/actions/setup@main
+      with:
+        mobile-path: ${{ inputs.mobile-path }}
+        install-js: "false"
+
+    - name: Download AAB artifact (this run)
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name != '' && inputs.artifact-name || format('mobile-android-{0}-{1}', inputs.version, github.run_number) }}
+        path: ${{ inputs.mobile-path }}/release/download
+
+    - name: Upload to Play (${{ inputs.android-track }})
+      working-directory: ${{ inputs.mobile-path }}
+      shell: bash
+      env:
+        APP_VERSION: ${{ inputs.version }}
+        APP_BUILD_NUMBER: ${{ github.run_number }}
+        MOBILE_PATH: ${{ inputs.mobile-path }}
+      run: |
+        set -euo pipefail
+        aab="$(find release/download -name '*.aab' | head -n1)"
+        [ -n "$aab" ] || { echo "::error::No AAB found in downloaded artifact."; exit 1; }
+        bundle exec fastlane android play_upload track:"${{ inputs.android-track }}" aab:"$aab"

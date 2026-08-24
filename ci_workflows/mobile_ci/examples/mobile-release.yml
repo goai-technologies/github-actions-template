@@ -1,0 +1,185 @@
+# Example: copy this into <product-repo>/.github/workflows/mobile-release.yml
+#
+# This is the ONE file that lives in the product repo. It wires the jobs, the
+# two runners (ubuntu for Android, macOS for iOS), and the store-push approval
+# gate, and delegates every step to the reusable composite actions in
+# goai-technologies/github-actions-template/ci_workflows/mobile_ci/actions/*.
+#
+# Why the orchestration lives here and not in the template: GitHub requires the
+# reviewer gate to be a job-level `environment:`, and only workflows have jobs.
+# Composite actions can't gate, fan out, or switch runners — so the template
+# ships the building blocks and this workflow assembles them. A bonus: the gate
+# uses THIS repo's Environments, so approvals go to your reviewers unambiguously.
+name: Mobile Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Marketing version (x.y.z)"
+        required: true
+        default: "1.0.1"
+      platform:
+        type: choice
+        options: [android, ios, both]
+        default: both
+      push_to_stores:
+        type: boolean
+        default: true
+      android_track:
+        type: choice
+        options: [internal, production]
+        default: internal
+      ios_target:
+        type: choice
+        options: [testflight, appstore]
+        default: testflight
+
+concurrency:
+  group: mobile-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Monorepo? Set MOBILE_PATH to the app root (e.g. artifacts/mobile) and
+# PNPM_FILTER to its workspace name. For a single-app repo leave them as ".".
+env:
+  MOBILE_PATH: "."
+  PNPM_FILTER: "."
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Materialize CI scripts (recipe only)
+        uses: goai-technologies/github-actions-template/ci_workflows/mobile_ci/actions/setup@main
+        with:
+          mobile-path: ${{ env.MOBILE_PATH }}
+          install-js: "false"
+          install-ruby: "false"
+      - name: Resolve version
+        id: resolve
+        working-directory: ${{ env.MOBILE_PATH }}
+        env:
+          APP_VERSION: ${{ inputs.version }}
+        run: bash scripts/resolve_mobile_version.sh
+
+  android:
+    needs: version
+    if: ${{ inputs.platform == 'android' || inputs.platform == 'both' }}
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_PACKAGE_NAME: ${{ secrets.ANDROID_PACKAGE_NAME }}
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Android (APK + AAB)
+        uses: goai-technologies/github-actions-template/ci_workflows/mobile_ci/actions/build-android@main
+        with:
+          version: ${{ needs.version.outputs.version }}
+          mobile-path: ${{ env.MOBILE_PATH }}
+          pnpm-filter: ${{ env.PNPM_FILTER }}
+          artifact-name: mobile-android-${{ needs.version.outputs.version }}-${{ github.run_number }}
+
+  ios:
+    needs: version
+    if: ${{ inputs.platform == 'ios' || inputs.platform == 'both' }}
+    runs-on: macos-latest
+    env:
+      IOS_BUNDLE_ID: ${{ secrets.IOS_BUNDLE_ID }}
+      IOS_SCHEME: ${{ secrets.IOS_SCHEME }}
+      ASC_TEAM_ID: ${{ secrets.ASC_TEAM_ID }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+      IOS_DIST_CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
+      IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+      IOS_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+      IOS_PROVISION_PROFILE_NAME: ${{ secrets.IOS_PROVISION_PROFILE_NAME }}
+      MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+      MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+      MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+      MATCH_GIT_BRANCH: ${{ secrets.MATCH_GIT_BRANCH }}
+      MATCH_DIST_P12_BASE64: ${{ secrets.MATCH_DIST_P12_BASE64 }}
+      MATCH_DIST_P12_PASSWORD: ${{ secrets.MATCH_DIST_P12_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build iOS (IPA)
+        uses: goai-technologies/github-actions-template/ci_workflows/mobile_ci/actions/build-ios@main
+        with:
+          version: ${{ needs.version.outputs.version }}
+          mobile-path: ${{ env.MOBILE_PATH }}
+          pnpm-filter: ${{ env.PNPM_FILTER }}
+          artifact-name: mobile-ios-${{ needs.version.outputs.version }}-${{ github.run_number }}
+
+  publish:
+    needs: [version, android, ios]
+    if: ${{ always() && (needs.android.result == 'success' || needs.ios.result == 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub Release (APK + AAB + IPA)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ${{ needs.version.outputs.tag }}
+          files: |
+            dist/**/app-*.apk
+            dist/**/app-*.aab
+            dist/**/app-*.ipa
+            dist/**/build-metadata.json
+          fail_on_unmatched_files: false
+
+  store-android:
+    needs: [version, android, publish]
+    if: ${{ inputs.push_to_stores && needs.android.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.android_track == 'production' && 'production' || 'beta' }}
+    env:
+      ANDROID_PACKAGE_NAME: ${{ secrets.ANDROID_PACKAGE_NAME }}
+      PLAY_JSON_BASE64: ${{ secrets.PLAY_JSON_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upload to Google Play
+        uses: goai-technologies/github-actions-template/ci_workflows/mobile_ci/actions/play-upload@main
+        with:
+          version: ${{ needs.version.outputs.version }}
+          mobile-path: ${{ env.MOBILE_PATH }}
+          android-track: ${{ inputs.android_track }}
+          artifact-name: mobile-android-${{ needs.version.outputs.version }}-${{ github.run_number }}
+
+  store-ios:
+    needs: [version, ios, publish]
+    if: ${{ inputs.push_to_stores && needs.ios.result == 'success' }}
+    runs-on: macos-latest
+    environment: ${{ inputs.ios_target == 'appstore' && 'production' || 'beta' }}
+    env:
+      IOS_BUNDLE_ID: ${{ secrets.IOS_BUNDLE_ID }}
+      IOS_SCHEME: ${{ secrets.IOS_SCHEME }}
+      ASC_TEAM_ID: ${{ secrets.ASC_TEAM_ID }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+      TF_GROUPS: ${{ vars.TF_GROUPS }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upload to ${{ inputs.ios_target }}
+        uses: goai-technologies/github-actions-template/ci_workflows/mobile_ci/actions/store-ios-upload@main
+        with:
+          version: ${{ needs.version.outputs.version }}
+          mobile-path: ${{ env.MOBILE_PATH }}
+          ios-target: ${{ inputs.ios_target }}
+          artifact-name: mobile-ios-${{ needs.version.outputs.version }}-${{ github.run_number }}
