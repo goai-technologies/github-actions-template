@@ -1,0 +1,69 @@
+name: "Mobile Play Upload"
+description: "Self-contained: materialize the Fastlane recipe + Ruby (no JS), download the AAB artifact built earlier in the run, and upload it to Google Play. Play secrets (ANDROID_PACKAGE_NAME, PLAY_JSON_BASE64) are read from the caller job's env. Put this job behind a GitHub Environment for the human-approval gate. No separate setup step is required."
+
+inputs:
+  version:
+    description: "Marketing version (x.y.z) — used to locate the artifact."
+    required: true
+  mobile-path:
+    description: "Expo app root. Use '.' for single-app repos."
+    required: false
+    default: "."
+  android-track:
+    description: "Play track: internal | production."
+    required: false
+    default: "internal"
+  artifact-name:
+    description: "Artifact to download. Defaults to mobile-android-<version>-<run_number> when blank."
+    required: false
+    default: ""
+  ruby-version:
+    description: "Ruby version for Fastlane."
+    required: false
+    default: "3.1"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Materialize Fastlane recipe into mobile-path
+      shell: bash
+      run: |
+        set -euo pipefail
+        recipe="${{ github.action_path }}/../.."
+        dest="${{ inputs.mobile-path }}"
+        if [ ! -d "$recipe/fastlane" ]; then
+          echo "::error::Recipe not found at $recipe (expected the mobile_ci recipe two levels above this action)."
+          exit 1
+        fi
+        mkdir -p "$dest/scripts"
+        rm -rf "$dest/fastlane"
+        cp -R "$recipe/fastlane" "$dest/fastlane"
+        cp "$recipe/Gemfile" "$dest/Gemfile"
+        cp "$recipe/scripts/"*.sh "$dest/scripts/"
+        echo "Materialized recipe from $recipe into '$dest'."
+
+    - name: Setup Ruby + Fastlane (bundler-cache)
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: ${{ inputs.ruby-version }}
+        bundler-cache: true
+        working-directory: ${{ inputs.mobile-path }}
+
+    - name: Download AAB artifact (this run)
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name != '' && inputs.artifact-name || format('mobile-android-{0}-{1}', inputs.version, github.run_number) }}
+        path: ${{ inputs.mobile-path }}/release/download
+
+    - name: Upload to Play (${{ inputs.android-track }})
+      working-directory: ${{ inputs.mobile-path }}
+      shell: bash
+      env:
+        APP_VERSION: ${{ inputs.version }}
+        APP_BUILD_NUMBER: ${{ github.run_number }}
+        MOBILE_PATH: ${{ inputs.mobile-path }}
+      run: |
+        set -euo pipefail
+        aab="$(find release/download -name '*.aab' | head -n1)"
+        [ -n "$aab" ] || { echo "::error::No AAB found in downloaded artifact."; exit 1; }
+        bundle exec fastlane android play_upload track:"${{ inputs.android-track }}" aab:"$aab"

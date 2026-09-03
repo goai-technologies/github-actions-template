@@ -1,0 +1,177 @@
+name: "Mobile Build Android"
+description: "Self-contained Android build: materialize the Fastlane recipe, set up JS + Ruby/Fastlane, Java 17 + Gradle, run Expo prebuild + `fastlane android build_android`, and upload the APK/AAB. Signing secrets (ANDROID_*) are read from the caller job's env. No separate setup step is required."
+
+inputs:
+  version:
+    description: "Marketing version (x.y.z)."
+    required: true
+  mobile-path:
+    description: "Expo app root. Use '.' for single-app repos."
+    required: false
+    default: "."
+  pnpm-filter:
+    description: "pnpm workspace filter for monorepos; '.' installs at mobile-path directly."
+    required: false
+    default: "."
+  android-project-dir:
+    description: "Path to the native android/ project, relative to mobile-path."
+    required: false
+    default: "android"
+  app-variant:
+    description: "Optional Expo APP_VARIANT passed through to prebuild/build."
+    required: false
+    default: ""
+  artifact-name:
+    description: "Uploaded artifact name. Defaults to mobile-android-<version>-<run_number> when blank."
+    required: false
+    default: ""
+  node-version:
+    description: "Node.js version."
+    required: false
+    default: "22"
+  ruby-version:
+    description: "Ruby version for Fastlane."
+    required: false
+    default: "3.1"
+  free-disk-space:
+    description: "On GitHub-hosted ubuntu runners, remove large unused preinstalled toolchains (.NET/Haskell/Swift/CodeQL/Docker images) to avoid 'No space left on device'. Keeps the Android SDK/NDK and Java/Node tool cache. Set 'false' on self-hosted runners."
+    required: false
+    default: "true"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Free disk space (hosted Linux runners)
+      if: ${{ inputs.free-disk-space == 'true' }}
+      shell: bash
+      run: |
+        set -uo pipefail
+        echo "Disk before cleanup:"; df -h / | tail -1
+        # Remove large preinstalled toolchains this Android build never uses.
+        # KEEP the Android SDK/NDK (/usr/local/lib/android) and the hosted tool cache (Java/Node).
+        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /usr/local/share/boost /usr/local/share/powershell 2>/dev/null || true
+        sudo rm -rf "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}/CodeQL" 2>/dev/null || true
+        sudo docker image prune --all --force 2>/dev/null || true
+        sudo apt-get clean 2>/dev/null || true
+        echo "Disk after cleanup:"; df -h / | tail -1
+
+    - uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: "17"
+
+    - name: Cache Gradle home
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+        restore-keys: gradle-${{ runner.os }}-
+
+    - name: Materialize Fastlane recipe into mobile-path
+      shell: bash
+      run: |
+        set -euo pipefail
+        recipe="${{ github.action_path }}/../.."
+        dest="${{ inputs.mobile-path }}"
+        if [ ! -d "$recipe/fastlane" ]; then
+          echo "::error::Recipe not found at $recipe (expected the mobile_ci recipe two levels above this action)."
+          exit 1
+        fi
+        mkdir -p "$dest/scripts"
+        rm -rf "$dest/fastlane"
+        cp -R "$recipe/fastlane" "$dest/fastlane"
+        cp "$recipe/Gemfile" "$dest/Gemfile"
+        cp "$recipe/scripts/"*.sh "$dest/scripts/"
+        echo "Materialized recipe from $recipe into '$dest'."
+
+    - name: Setup pnpm (if pnpm-lock present)
+      if: ${{ hashFiles('pnpm-workspace.yaml', 'pnpm-lock.yaml', format('{0}/pnpm-lock.yaml', inputs.mobile-path)) != '' }}
+      uses: pnpm/action-setup@v4
+
+    - name: Setup Bun (if bun lockfile present)
+      if: ${{ hashFiles(format('{0}/bun.lockb', inputs.mobile-path), format('{0}/bun.lock', inputs.mobile-path)) != '' }}
+      uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: latest
+
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: ${{ hashFiles(format('{0}/pnpm-lock.yaml', inputs.mobile-path)) != '' && 'pnpm' || (hashFiles(format('{0}/yarn.lock', inputs.mobile-path)) != '' && 'yarn' || (hashFiles(format('{0}/package-lock.json', inputs.mobile-path)) != '' && 'npm' || '')) }}
+        cache-dependency-path: |
+          ${{ inputs.mobile-path }}/pnpm-lock.yaml
+          ${{ inputs.mobile-path }}/yarn.lock
+          ${{ inputs.mobile-path }}/package-lock.json
+
+    - name: Install JS dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+        FILTER='${{ inputs.pnpm-filter }}'
+        MP='${{ inputs.mobile-path }}'
+        # pnpm workspace/monorepo: the lockfile + pnpm-workspace.yaml live at the repo root,
+        # so install from the root (matches `pnpm install --filter <pkg>...` at the workspace root).
+        if [ -f pnpm-workspace.yaml ] || [ -f pnpm-lock.yaml ]; then
+          if [ "$FILTER" = "." ]; then
+            pnpm install --frozen-lockfile
+          else
+            pnpm install --frozen-lockfile --filter "${FILTER}..."
+          fi
+        elif [ -f "$MP/pnpm-lock.yaml" ]; then
+          cd "$MP" && pnpm install --frozen-lockfile
+        elif [ -f "$MP/yarn.lock" ]; then
+          cd "$MP" && yarn install --frozen-lockfile
+        elif [ -f "$MP/bun.lockb" ] || [ -f "$MP/bun.lock" ]; then
+          cd "$MP" && bun install --frozen-lockfile
+        elif [ -f "$MP/package-lock.json" ]; then
+          cd "$MP" && npm ci
+        else
+          cd "$MP" && npm install
+        fi
+
+    - name: Setup Ruby + Fastlane (bundler-cache)
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: ${{ inputs.ruby-version }}
+        bundler-cache: true
+        working-directory: ${{ inputs.mobile-path }}
+
+    - name: Expo prebuild (android) if applicable
+      working-directory: ${{ inputs.mobile-path }}
+      shell: bash
+      env:
+        APP_VARIANT: ${{ inputs.app-variant }}
+      run: |
+        set -euo pipefail
+        if [ "${SKIP_PREBUILD:-}" != "true" ] && { [ -f "app.json" ] || [ -f "app.config.js" ] || [ -f "app.config.ts" ]; }; then
+          echo "Expo config detected — running expo prebuild (android)."
+          npx expo prebuild --platform android --no-install
+        else
+          echo "Skipping expo prebuild (native android/ present or SKIP_PREBUILD=true)."
+        fi
+
+    - name: Build Android APK + AAB (Fastlane)
+      working-directory: ${{ inputs.mobile-path }}
+      shell: bash
+      env:
+        APP_VERSION: ${{ inputs.version }}
+        APP_BUILD_NUMBER: ${{ github.run_number }}
+        MOBILE_PATH: ${{ inputs.mobile-path }}
+        ANDROID_PROJECT_DIR: ${{ inputs.android-project-dir }}
+        APP_VARIANT: ${{ inputs.app-variant }}
+        ORG_GRADLE_OPTS: "-Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g"
+        GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+      run: bundle exec fastlane android build_android version:"${{ inputs.version }}" build:${{ github.run_number }}
+
+    - name: Upload android artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name != '' && inputs.artifact-name || format('mobile-android-{0}-{1}', inputs.version, github.run_number) }}
+        path: |
+          ${{ inputs.mobile-path }}/release/${{ inputs.version }}+${{ github.run_number }}/app-*.apk
+          ${{ inputs.mobile-path }}/release/${{ inputs.version }}+${{ github.run_number }}/app-*.aab
+          ${{ inputs.mobile-path }}/release/${{ inputs.version }}+${{ github.run_number }}/build-metadata.json
+        if-no-files-found: error
