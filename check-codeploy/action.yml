@@ -35,6 +35,7 @@ runs:
         DEPLOYMENT_ID=$(aws deploy list-deployments \
                           --application-name "$APP" \
                           --deployment-group-name "$DG" \
+                          --no-paginate \
                           --query "deployments[0]" \
                           --output text)
 
