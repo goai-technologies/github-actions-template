@@ -28,7 +28,7 @@ runs:
   using: "composite"
   steps:
     - name: Configure AWS credentials from OIDC
-      uses: aws-actions/configure-aws-credentials@v4
+      uses: aws-actions/configure-aws-credentials@v6
       with:
         role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
         aws-region: ${{ inputs.aws-region }}
